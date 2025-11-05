@@ -120,12 +120,11 @@ const Parser = struct {
 
         try self.parsePrecedence(.Unary);
 
-        switch (op) {
-            .Minus => {
-                try self.emitOp(.Negate);
-            },
+        return switch (op) {
+            .Bang => self.emitOp(.Not),
+            .Minus => self.emitOp(.Negate),
             else => unreachable,
-        }
+        };
     }
 
     fn binary(self: *Parser) !void {
@@ -134,10 +133,25 @@ const Parser = struct {
         try self.parsePrecedence(rule.precedence.next());
 
         return switch (op) {
+            .BangEqual => self.emitOps(.Equal, .Not),
+            .EqualEqual => self.emitOp(.Equal),
+            .Greater => self.emitOp(.Greater),
+            .GreaterEqual => self.emitOps(.Less, .Not),
+            .Less => self.emitOp(.Less),
+            .LessEqual => self.emitOps(.Greater, .Not),
             .Plus => self.emitOp(.Add),
             .Minus => self.emitOp(.Subtract),
             .Star => self.emitOp(.Multiply),
             .Slash => self.emitOp(.Divide),
+            else => unreachable,
+        };
+    }
+
+    fn literal(self: *Parser) !void {
+        return switch (self.previous.type) {
+            .Nil => self.emitOp(.Nil),
+            .True => self.emitOp(.True),
+            .False => self.emitOp(.False),
             else => unreachable,
         };
     }
@@ -149,7 +163,7 @@ const Parser = struct {
 
     fn number(self: *Parser) !void {
         const value = try std.fmt.parseFloat(f64, self.previous.lexeme);
-        try self.emitConstant(Value{ .Number = value });
+        try self.emitConstant(Value.fromNumber(value));
     }
 
     pub fn consume(self: *Parser, tokenType: TokenType, message: []const u8) void {
@@ -193,6 +207,11 @@ const Parser = struct {
         try self.emitByte(byte);
     }
 
+    fn emitOps(self: *Parser, a: OpCode, b: OpCode) !void {
+        try self.emitOp(a);
+        try self.emitOp(b);
+    }
+
     fn emitReturn(self: *Parser) !void {
         try self.emitOp(OpCode.Return);
     }
@@ -234,14 +253,48 @@ const Parser = struct {
     }
 
     fn getRule(op: TokenType) ParseRule {
+        const empty: ParseRule = .{ .prefix = null, .infix = null, .precedence = .None };
         return switch (op) {
             .LeftParen => .{ .prefix = grouping, .infix = null, .precedence = .None },
+            .RightParen => empty,
+            .LeftBrace => empty,
+            .RightBrace => empty,
+            .Comma => empty,
+            .Dot => empty,
             .Minus => .{ .prefix = unary, .infix = binary, .precedence = .Term },
             .Plus => .{ .prefix = null, .infix = binary, .precedence = .Term },
+            .Semicolon => empty,
             .Slash => .{ .prefix = null, .infix = binary, .precedence = .Factor },
             .Star => .{ .prefix = null, .infix = binary, .precedence = .Factor },
+            .Bang => .{ .prefix = unary, .infix = null, .precedence = .None },
+            .BangEqual => .{ .prefix = null, .infix = binary, .precedence = .Equality },
+            .Equal => empty,
+            .EqualEqual => .{ .prefix = null, .infix = binary, .precedence = .Equality },
+            .Greater => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
+            .GreaterEqual => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
+            .Less => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
+            .LessEqual => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
+            .Identifier => empty,
+            .String => empty,
             .Number => .{ .prefix = number, .infix = null, .precedence = .None },
-            else => .{ .prefix = null, .infix = null, .precedence = .None },
+            .And => empty,
+            .Class => empty,
+            .Else => empty,
+            .False => .{ .prefix = literal, .infix = null, .precedence = .None },
+            .For => empty,
+            .Fun => empty,
+            .If => empty,
+            .Nil => .{ .prefix = literal, .infix = null, .precedence = .None },
+            .Or => empty,
+            .Print => empty,
+            .Return => empty,
+            .Super => empty,
+            .This => empty,
+            .True => .{ .prefix = literal, .infix = null, .precedence = .None },
+            .Var => empty,
+            .While => empty,
+            .Error => empty,
+            .Eof => empty,
         };
     }
 };

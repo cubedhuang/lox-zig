@@ -6,10 +6,17 @@ const Value = @import("value.zig").Value;
 pub const OpCode = enum(u8) {
     Constant,
     ConstantLong,
+    Nil,
+    True,
+    False,
+    Equal,
+    Greater,
+    Less,
     Add,
     Subtract,
     Multiply,
     Divide,
+    Not,
     Negate,
     Return,
 };
@@ -106,16 +113,23 @@ pub const Chunk = struct {
         return switch (instruction) {
             .Constant => self.constantInstruction("Constant", offset),
             .ConstantLong => self.constantLongInstruction("ConstantLong", offset),
+            .Nil => simpleInstruction("Nil", offset),
+            .True => simpleInstruction("True", offset),
+            .False => simpleInstruction("False", offset),
+            .Equal => simpleInstruction("Equal", offset),
+            .Greater => simpleInstruction("Greater", offset),
+            .Less => simpleInstruction("Less", offset),
             .Add => simpleInstruction("Add", offset),
             .Subtract => simpleInstruction("Subtract", offset),
             .Multiply => simpleInstruction("Multiply", offset),
             .Divide => simpleInstruction("Divide", offset),
+            .Not => simpleInstruction("Not", offset),
             .Negate => simpleInstruction("Negate", offset),
             .Return => simpleInstruction("Return", offset),
         };
     }
 
-    fn getLine(self: *const Chunk, offset: usize) usize {
+    pub fn getLine(self: *const Chunk, offset: usize) usize {
         var current = offset;
 
         for (self.lines.items) |line_count| {
