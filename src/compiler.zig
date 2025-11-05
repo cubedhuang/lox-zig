@@ -4,6 +4,7 @@ const DEBUG_SHOW_TOKENS = @import("debug.zig").DEBUG_SHOW_TOKENS;
 const DEBUG_PRINT_CODE = @import("debug.zig").DEBUG_PRINT_CODE;
 
 const Chunk = @import("chunk.zig").Chunk;
+const Obj = @import("object.zig").Obj;
 const OpCode = @import("chunk.zig").OpCode;
 const Scanner = @import("scanner.zig").Scanner;
 const Token = @import("scanner.zig").Token;
@@ -29,17 +30,17 @@ const Precedence = enum(u8) {
     }
 };
 
-pub fn compile(allocator: std.mem.Allocator, source: []const u8) !Chunk {
-    var chunk = try Chunk.init(allocator);
+pub fn compile(vm: *VM, source: []const u8) !Chunk {
+    var chunk = try Chunk.init(vm.allocator);
 
-    var parser = Parser.init(allocator, source, &chunk);
+    var parser = Parser.init(vm, source, &chunk);
     parser.advance();
     try parser.expression();
     parser.consume(TokenType.Eof, "Expected end of expression.");
     try parser.end();
 
     if (parser.hadError) {
-        chunk.deinit(allocator);
+        chunk.deinit(vm.allocator);
         return error.CompilerError;
     }
     return chunk;
@@ -68,7 +69,7 @@ fn showTokens(scanner: *Scanner) void {
 }
 
 const Parser = struct {
-    allocator: std.mem.Allocator,
+    vm: *VM,
     scanner: Scanner,
     source: []const u8,
     current: Token,
@@ -77,14 +78,14 @@ const Parser = struct {
     panicMode: bool,
     compilingChunk: *Chunk,
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8, chunk: *Chunk) Parser {
+    pub fn init(vm: *VM, source: []const u8, chunk: *Chunk) Parser {
         var scanner = Scanner.init(source);
         if (DEBUG_SHOW_TOKENS) {
             showTokens(&scanner);
         }
 
         return Parser{
-            .allocator = allocator,
+            .vm = vm,
             .scanner = scanner,
             .source = source,
             .current = undefined,
@@ -166,6 +167,15 @@ const Parser = struct {
         try self.emitConstant(Value.fromNumber(value));
     }
 
+    fn string(self: *Parser) !void {
+        try self.emitConstant(try self.stringValue());
+    }
+
+    fn stringValue(self: *Parser) !Value {
+        const value = self.previous.lexeme[1 .. self.previous.lexeme.len - 1];
+        return (try Obj.String.copy(self.vm, value)).obj.toValue();
+    }
+
     pub fn consume(self: *Parser, tokenType: TokenType, message: []const u8) void {
         if (self.current.type == tokenType) {
             self.advance();
@@ -199,7 +209,7 @@ const Parser = struct {
     }
 
     fn emitConstant(self: *Parser, value: Value) !void {
-        try self.currentChunk().writeConstant(self.allocator, value, self.previous.line);
+        try self.currentChunk().writeConstant(self.vm.allocator, value, self.previous.line);
     }
 
     fn emitUnaryOp(self: *Parser, op: OpCode, byte: u8) !void {
@@ -221,7 +231,7 @@ const Parser = struct {
     }
 
     fn emitByte(self: *Parser, byte: u8) !void {
-        try self.currentChunk().write(self.allocator, byte, self.previous.line);
+        try self.currentChunk().write(self.vm.allocator, byte, self.previous.line);
     }
 
     fn currentChunk(self: *Parser) *Chunk {
@@ -275,7 +285,7 @@ const Parser = struct {
             .Less => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
             .LessEqual => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
             .Identifier => empty,
-            .String => empty,
+            .String => .{ .prefix = string, .infix = null, .precedence = .None },
             .Number => .{ .prefix = number, .infix = null, .precedence = .None },
             .And => empty,
             .Class => empty,

@@ -5,6 +5,7 @@ const ArrayList = std.ArrayList;
 const DEBUG_TRACE_EXECUTION = @import("debug.zig").DEBUG_TRACE_EXECUTION;
 
 const Chunk = @import("chunk.zig").Chunk;
+const Obj = @import("object.zig").Obj;
 const OpCode = @import("chunk.zig").OpCode;
 const Value = @import("value.zig").Value;
 
@@ -20,6 +21,7 @@ pub const VM = struct {
     chunk: Chunk,
     ip: usize,
     stack: ArrayList(Value),
+    objects: ?*Obj,
 
     pub fn init(allocator: Allocator) !VM {
         return VM{
@@ -27,15 +29,26 @@ pub const VM = struct {
             .chunk = undefined,
             .ip = 0,
             .stack = try ArrayList(Value).initCapacity(allocator, 0),
+            .objects = null,
         };
     }
 
     pub fn deinit(self: *VM) void {
         self.stack.deinit(self.allocator);
+        self.freeObjects();
+    }
+
+    fn freeObjects(self: *VM) void {
+        var object = self.objects;
+        while (object) |obj| {
+            const next = obj.next;
+            obj.deinit(self.allocator);
+            object = next;
+        }
     }
 
     pub fn interpret(self: *VM, source: []const u8) !void {
-        self.chunk = try compile(self.allocator, source);
+        self.chunk = try compile(self, source);
         defer self.chunk.deinit(self.allocator);
         self.ip = 0;
 
@@ -68,7 +81,22 @@ pub const VM = struct {
                 .Equal => try self.push(Value.fromBool(self.pop().equals(self.pop()))),
                 .Greater => try self.binary(Value.fromBool, gt),
                 .Less => try self.binary(Value.fromBool, lt),
-                .Add => try self.binary(Value.fromNumber, add),
+                .Add => {
+                    const a = self.peek(1);
+                    const b = self.peek(0);
+                    if (a.isObj() and b.isObj() and
+                        a.asObj().isString() and b.asObj().isString())
+                    {
+                        try self.concat();
+                    } else if (a.isNumber() and b.isNumber()) {
+                        _ = self.pop();
+                        _ = self.pop();
+                        try self.push(Value.fromNumber(a.asNumber() + b.asNumber()));
+                    } else {
+                        self.runtimeError("Operands must both be numbers or both be strings.", .{});
+                        return error.RuntimeError;
+                    }
+                },
                 .Subtract => try self.binary(Value.fromNumber, sub),
                 .Multiply => try self.binary(Value.fromNumber, mul),
                 .Divide => try self.binary(Value.fromNumber, div),
@@ -97,6 +125,15 @@ pub const VM = struct {
         const b = self.pop().asNumber();
         const a = self.pop().asNumber();
         try self.push(valueType(op(a, b)));
+    }
+
+    fn concat(self: *VM) !void {
+        const b = self.pop().asObj().asString();
+        const a = self.pop().asObj().asString();
+
+        const buffer = try std.mem.concat(self.allocator, u8, &.{ a.buffer, b.buffer });
+        const string = try Obj.String.init(self, buffer);
+        try self.push(string.obj.toValue());
     }
 
     fn printStack(self: *VM) void {

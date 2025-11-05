@@ -1,11 +1,14 @@
 const std = @import("std");
 
+const Obj = @import("object.zig").Obj;
+
 pub const Value = UnionValue;
 
 const UnionValue = union(enum) {
     Nil,
     Bool: bool,
     Number: f64,
+    Obj: *Obj,
 
     pub fn equals(self: UnionValue, other: UnionValue) bool {
         if (std.meta.activeTag(self) != std.meta.activeTag(other)) {
@@ -14,8 +17,13 @@ const UnionValue = union(enum) {
 
         return switch (self) {
             .Nil => true,
-            .Bool => |a| a == other.Bool,
-            .Number => |a| a == other.Number,
+            .Bool => |a| a == other.asBool(),
+            .Number => |a| a == other.asNumber(),
+            .Obj => |obj| {
+                const a = obj.asString();
+                const b = other.asObj().asString();
+                return std.mem.eql(u8, a.buffer, b.buffer);
+            },
         };
     }
 
@@ -24,19 +32,24 @@ const UnionValue = union(enum) {
             .Nil => writer.print("nil", .{}),
             .Bool => |val| writer.print("{}", .{val}),
             .Number => |val| writer.print("{d}", .{val}),
+            .Obj => |val| formatObj(val, writer),
         };
     }
 
     pub fn nil() UnionValue {
-        return UnionValue{ .Nil = {} };
+        return .{ .Nil = {} };
     }
 
     pub fn fromBool(value: bool) UnionValue {
-        return UnionValue{ .Bool = value };
+        return .{ .Bool = value };
     }
 
     pub fn fromNumber(value: f64) UnionValue {
-        return UnionValue{ .Number = value };
+        return .{ .Number = value };
+    }
+
+    pub fn fromObj(value: *Obj) UnionValue {
+        return .{ .Obj = value };
     }
 
     pub fn isNil(self: UnionValue) bool {
@@ -55,6 +68,10 @@ const UnionValue = union(enum) {
         return self == .Number;
     }
 
+    pub fn isObj(self: UnionValue) bool {
+        return self == .Obj;
+    }
+
     pub fn asBool(self: UnionValue) bool {
         return self.Bool;
     }
@@ -62,4 +79,14 @@ const UnionValue = union(enum) {
     pub fn asNumber(self: UnionValue) f64 {
         return self.Number;
     }
+
+    pub fn asObj(self: UnionValue) *Obj {
+        return self.Obj;
+    }
 };
+
+fn formatObj(obj: *Obj, writer: anytype) !void {
+    return switch (obj.type) {
+        .String => writer.print("{s}", .{obj.asString().buffer}),
+    };
+}
