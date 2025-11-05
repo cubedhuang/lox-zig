@@ -1,8 +1,5 @@
 const std = @import("std");
 const lox = @import("root.zig");
-const Chunk = lox.chunk.Chunk;
-const OpCode = lox.chunk.OpCode;
-const Value = lox.value.Value;
 const VM = lox.vm.VM;
 
 const LoxError = error{ArgumentError};
