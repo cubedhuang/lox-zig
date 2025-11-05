@@ -30,26 +30,6 @@ pub fn main() !void {
             return LoxError.ArgumentError;
         },
     }
-
-    // var chunk = try Chunk.init(allocator);
-    // defer chunk.deinit(allocator);
-
-    // var vm = try VM.init(allocator);
-    // defer vm.deinit();
-
-    // try chunk.writeConstant(allocator, Value{ .Number = 1.2 }, 1);
-    // try chunk.writeConstant(allocator, Value{ .Number = 3.4 }, 1);
-    // try chunk.writeOp(allocator, OpCode.Add, 1);
-    // try chunk.writeConstant(allocator, Value{ .Number = 5.6 }, 1);
-    // try chunk.writeOp(allocator, OpCode.Divide, 1);
-    // try chunk.writeOp(allocator, OpCode.Negate, 1);
-    // try chunk.writeOp(allocator, OpCode.Return, 2);
-
-    // chunk.disassemble("test chunk");
-
-    // std.debug.print("\n\n", .{});
-
-    // try vm.interpret(&chunk);
 }
 
 fn repl(allocator: std.mem.Allocator) !void {
@@ -68,7 +48,9 @@ fn repl(allocator: std.mem.Allocator) !void {
         }
         const line = buffer[0..len];
 
-        try vm.interpret(line);
+        vm.interpret(line) catch |err| {
+            std.debug.print("{any}\n", .{err});
+        };
     }
 }
 
@@ -79,7 +61,9 @@ fn runFile(allocator: std.mem.Allocator, path: []const u8) !void {
     var vm = try VM.init(allocator);
     defer vm.deinit();
 
-    try vm.interpret(source);
+    vm.interpret(source) catch |err| {
+        std.debug.print("{any}\n", .{err});
+    };
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
