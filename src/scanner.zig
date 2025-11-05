@@ -205,7 +205,7 @@ pub const Scanner = struct {
             't' => if (self.current - self.start > 1)
                 switch (self.source[self.start + 1]) {
                     'h' => self.checkKeyword(2, "is", .This),
-                    'r' => self.checkKeyword(2, "us", .True),
+                    'r' => self.checkKeyword(2, "ue", .True),
                     else => .Identifier,
                 }
             else
