@@ -146,6 +146,14 @@ pub const VM = struct {
                 .Print => {
                     std.debug.print("{f}\n", .{self.pop()});
                 },
+                .Jump => {
+                    const offset = self.readBytes(true);
+                    self.ip += offset;
+                },
+                .JumpIfFalse => {
+                    const offset = self.readBytes(true);
+                    if (self.peek(0).isFalsey()) self.ip += offset;
+                },
                 .Return => {
                     return;
                 },

@@ -30,6 +30,8 @@ pub const OpCode = enum(u8) {
     Not,
     Negate,
     Print,
+    Jump,
+    JumpIfFalse,
     Return,
 };
 
@@ -173,6 +175,8 @@ pub const Chunk = struct {
             .Not => simpleInstruction("Not", offset),
             .Negate => simpleInstruction("Negate", offset),
             .Print => simpleInstruction("Print", offset),
+            .Jump => self.jumpInstruction("Jump", 1, offset),
+            .JumpIfFalse => self.jumpInstruction("JumpIfFalse", 1, offset),
             .Return => simpleInstruction("Return", offset),
         };
     }
@@ -199,18 +203,16 @@ pub const Chunk = struct {
         const constant = self.code.items[offset + 1];
         const value = self.constants.items[constant];
 
-        std.debug.print("{s} {d:12} '{f}'\n", .{ name, constant, value });
+        std.debug.print("{s:<16} {d:4} '{f}'\n", .{ name, constant, value });
 
         return offset + 2;
     }
 
     fn constantLongInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const constant = (@as(usize, self.code.items[offset + 1]) << 16) +
-            (@as(usize, self.code.items[offset + 2]) << 8) +
-            self.code.items[offset + 3];
+        const constant = self.readLong(offset);
         const value = self.constants.items[constant];
 
-        std.debug.print("{s} {d:8} '{f}'\n", .{ name, constant, value });
+        std.debug.print("{s:<16} {d:4} '{f}'\n", .{ name, constant, value });
 
         return offset + 4;
     }
@@ -218,18 +220,35 @@ pub const Chunk = struct {
     fn byteInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
         const slot = self.code.items[offset + 1];
 
-        std.debug.print("{s} {d:12}\n", .{ name, slot });
+        std.debug.print("{s:<16} {d:4}\n", .{ name, slot });
 
         return offset + 2;
     }
 
     fn byteLongInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const slot = (@as(usize, self.code.items[offset + 1]) << 16) +
-            (@as(usize, self.code.items[offset + 2]) << 8) +
-            self.code.items[offset + 3];
+        const slot = self.readLong(offset);
 
-        std.debug.print("{s} {d:8}\n", .{ name, slot });
+        std.debug.print("{s:<16} {d:4}\n", .{ name, slot });
 
         return offset + 4;
+    }
+
+    fn jumpInstruction(self: *const Chunk, name: []const u8, sign: isize, offset: usize) usize {
+        const jump = self.readLong(offset);
+
+        std.debug.print("{s:<16} {d:4} -> {d}\n", .{
+            name,
+            offset,
+            @as(isize, @intCast(offset + 4)) +
+                sign * @as(isize, @intCast(jump)),
+        });
+
+        return offset + 4;
+    }
+
+    fn readLong(self: *const Chunk, offset: usize) usize {
+        return (@as(usize, self.code.items[offset + 1]) << 16) +
+            (@as(usize, self.code.items[offset + 2]) << 8) +
+            self.code.items[offset + 3];
     }
 };

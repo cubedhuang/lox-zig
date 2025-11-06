@@ -140,9 +140,11 @@ const Parser = struct {
         try self.defineVariable(global);
     }
 
-    fn statement(self: *Parser) !void {
+    fn statement(self: *Parser) Error!void {
         if (self.match(.Print)) {
             try self.printStatement();
+        } else if (self.match(.If)) {
+            try self.ifStatement();
         } else if (self.match(.LeftBrace)) {
             self.beginScope();
             try self.block();
@@ -156,6 +158,21 @@ const Parser = struct {
         try self.expression();
         self.consume(.Semicolon, "Expected ';' after expression.");
         try self.emitOp(.Print);
+    }
+
+    fn ifStatement(self: *Parser) !void {
+        self.consume(.LeftParen, "Expected '(' after 'if'.");
+        try self.expression();
+        self.consume(.RightParen, "Expected ')' after condition.");
+
+        const thenJump = try self.emitJump(.JumpIfFalse);
+        try self.emitOp(.Pop);
+        try self.statement();
+        const elseJump = try self.emitJump(.Jump);
+        self.patchJump(thenJump);
+        try self.emitOp(.Pop);
+        if (self.match(.Else)) try self.statement();
+        self.patchJump(elseJump);
     }
 
     fn block(self: *Parser) !void {
@@ -443,6 +460,26 @@ const Parser = struct {
 
     pub fn check(self: *Parser, tokenType: TokenType) bool {
         return self.current.type == tokenType;
+    }
+
+    fn emitJump(self: *Parser, op: OpCode) !usize {
+        try self.emitOp(op);
+        inline for (0..3) |_| {
+            try self.emitByte(0xFF);
+        }
+        return self.currentChunk().code.items.len - 3;
+    }
+
+    fn patchJump(self: *Parser, offset: usize) void {
+        const jump = self.currentChunk().code.items.len - 3 - offset;
+
+        if (jump > std.math.maxInt(u24)) {
+            self.err("Too much code to jump over.");
+        }
+
+        self.currentChunk().code.items[offset] = @intCast(jump >> 16);
+        self.currentChunk().code.items[offset + 1] = @intCast((jump >> 8) & 0xFF);
+        self.currentChunk().code.items[offset + 2] = @intCast(jump & 0xFF);
     }
 
     fn emitOpWithConstant(self: *Parser, op: OpCode, opLong: OpCode, constant: usize) !void {
