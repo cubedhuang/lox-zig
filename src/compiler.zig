@@ -143,6 +143,8 @@ const Parser = struct {
     fn statement(self: *Parser) Error!void {
         if (self.match(.Print)) {
             try self.printStatement();
+        } else if (self.match(.For)) {
+            try self.forStatement();
         } else if (self.match(.If)) {
             try self.ifStatement();
         } else if (self.match(.While)) {
@@ -160,6 +162,52 @@ const Parser = struct {
         try self.expression();
         self.consume(.Semicolon, "Expected ';' after expression.");
         try self.emitOp(.Print);
+    }
+
+    fn forStatement(self: *Parser) !void {
+        self.beginScope();
+
+        self.consume(.LeftParen, "Expected '(' after 'for'.");
+        if (self.match(.Var)) {
+            try self.varDeclaration();
+        } else if (!self.match(.Semicolon)) {
+            try self.expressionStatement();
+        }
+
+        var loopStart = self.currentChunk().code.items.len;
+
+        var exitJump: ?usize = null;
+        if (!self.match(.Semicolon)) {
+            try self.expression();
+            self.consume(.Semicolon, "Expected ';' after loop condition.");
+
+            exitJump = try self.emitJump(.JumpIfFalse);
+            try self.emitOp(.Pop);
+        }
+
+        if (!self.match(.RightParen)) {
+            const bodyJump = try self.emitJump(.Jump);
+            const incrementStart = self.currentChunk().code.items.len;
+
+            try self.expression();
+            try self.emitOp(.Pop);
+            self.consume(.RightParen, "Expected ')' after 'for' clauses.");
+
+            try self.emitLoop(loopStart);
+            loopStart = incrementStart;
+
+            self.patchJump(bodyJump);
+        }
+
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        if (exitJump) |jump| {
+            self.patchJump(jump);
+            try self.emitOp(.Pop);
+        }
+
+        try self.endScope();
     }
 
     fn ifStatement(self: *Parser) !void {
