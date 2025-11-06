@@ -187,9 +187,9 @@ pub const VM = struct {
 
     fn readConstant(self: *VM, long: bool) Value {
         if (long) {
-            const constant = (@as(usize, self.chunk.code.items[self.readByte()]) << 16) +
-                (@as(usize, self.chunk.code.items[self.readByte()]) << 8) +
-                self.chunk.code.items[self.readByte()];
+            const constant = (@as(usize, self.readByte()) << 16) +
+                (@as(usize, self.readByte()) << 8) +
+                self.readByte();
             return self.chunk.constants.items[constant];
         } else {
             return self.chunk.constants.items[self.readByte()];
