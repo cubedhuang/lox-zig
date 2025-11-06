@@ -325,6 +325,26 @@ const Parser = struct {
         };
     }
 
+    fn and_(self: *Parser) !void {
+        const endJump = try self.emitJump(.JumpIfFalse);
+
+        try self.emitOp(.Pop);
+        try self.parsePrecedence(.And);
+
+        self.patchJump(endJump);
+    }
+
+    fn or_(self: *Parser) !void {
+        const elseJump = try self.emitJump(.JumpIfFalse);
+        const endJump = try self.emitJump(.Jump);
+
+        self.patchJump(elseJump);
+        try self.emitOp(.Pop);
+
+        try self.parsePrecedence(.Or);
+        self.patchJump(endJump);
+    }
+
     fn literal(self: *Parser) !void {
         return switch (self.previous.type) {
             .Nil => self.emitOp(.Nil),
@@ -555,9 +575,7 @@ const Parser = struct {
             .Identifier => try self.variable(canAssign),
             .String => try self.string(),
             .Number => try self.number(),
-            .False => try self.literal(),
-            .Nil => try self.literal(),
-            .True => try self.literal(),
+            .False, .Nil, .True => try self.literal(),
             else => {
                 self.tokenError();
                 return false;
@@ -579,6 +597,8 @@ const Parser = struct {
             .GreaterEqual => try self.binary(),
             .Less => try self.binary(),
             .LessEqual => try self.binary(),
+            .And => try self.and_(),
+            .Or => try self.or_(),
             else => {
                 self.tokenError();
                 return false;
@@ -634,7 +654,7 @@ fn getPrecedence(op: TokenType) Precedence {
         .Identifier => .None,
         .String => .None,
         .Number => .None,
-        .And => .None,
+        .And => .And,
         .Class => .None,
         .Else => .None,
         .False => .None,
@@ -642,7 +662,7 @@ fn getPrecedence(op: TokenType) Precedence {
         .Fun => .None,
         .If => .None,
         .Nil => .None,
-        .Or => .None,
+        .Or => .Or,
         .Print => .None,
         .Return => .None,
         .Super => .None,
