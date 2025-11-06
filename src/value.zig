@@ -19,11 +19,7 @@ const UnionValue = union(enum) {
             .Nil => true,
             .Bool => |a| a == other.asBool(),
             .Number => |a| a == other.asNumber(),
-            .Obj => |obj| {
-                const a = obj.asString();
-                const b = other.asObj().asString();
-                return std.mem.eql(u8, a.buffer, b.buffer);
-            },
+            .Obj => |a| a == other.asObj(),
         };
     }
 

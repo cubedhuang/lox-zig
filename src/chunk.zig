@@ -9,6 +9,13 @@ pub const OpCode = enum(u8) {
     Nil,
     True,
     False,
+    Pop,
+    GetGlobal,
+    GetGlobalLong,
+    DefineGlobal,
+    DefineGlobalLong,
+    SetGlobal,
+    SetGlobalLong,
     Equal,
     Greater,
     Less,
@@ -18,6 +25,7 @@ pub const OpCode = enum(u8) {
     Divide,
     Not,
     Negate,
+    Print,
     Return,
 };
 
@@ -62,14 +70,20 @@ pub const Chunk = struct {
         try self.write(allocator, @intFromEnum(op), line);
     }
 
-    pub fn writeConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value, line: usize) !void {
-        const constant = try self.addConstant(allocator, value);
-
+    /// writes an op that relies on either a short or long constant with both op types
+    pub fn writeOpWithConstant(
+        self: *Chunk,
+        allocator: std.mem.Allocator,
+        op: OpCode,
+        opLong: OpCode,
+        constant: usize,
+        line: usize,
+    ) !void {
         if (constant < 256) {
-            try self.writeOp(allocator, .Constant, line);
+            try self.writeOp(allocator, op, line);
             try self.write(allocator, @intCast(constant), line);
         } else if (constant < 1 << 24) {
-            try self.writeOp(allocator, .ConstantLong, line);
+            try self.writeOp(allocator, opLong, line);
             try self.write(allocator, @intCast(constant >> 16), line);
             try self.write(allocator, @intCast((constant >> 8) & 0xFF), line);
             try self.write(allocator, @intCast(constant & 0xFF), line);
@@ -78,7 +92,25 @@ pub const Chunk = struct {
         }
     }
 
-    fn addConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value) !usize {
+    /// writes an op that relies on either a short or long constant with both op types
+    pub fn writeOpWithConstantValue(
+        self: *Chunk,
+        allocator: std.mem.Allocator,
+        op: OpCode,
+        opLong: OpCode,
+        value: Value,
+        line: usize,
+    ) !void {
+        const constant = try self.addConstant(allocator, value);
+
+        try self.writeOpWithConstant(allocator, op, opLong, constant, line);
+    }
+
+    pub fn writeConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value, line: usize) !void {
+        try self.writeOpWithConstantValue(allocator, .Constant, .ConstantLong, value, line);
+    }
+
+    pub fn addConstant(self: *Chunk, allocator: std.mem.Allocator, value: Value) !usize {
         for (self.constants.items, 0..) |constant, i| {
             if (constant.equals(value)) {
                 return i;
@@ -116,6 +148,13 @@ pub const Chunk = struct {
             .Nil => simpleInstruction("Nil", offset),
             .True => simpleInstruction("True", offset),
             .False => simpleInstruction("False", offset),
+            .Pop => simpleInstruction("Pop", offset),
+            .GetGlobal => self.constantInstruction("GetGlobal", offset),
+            .GetGlobalLong => self.constantLongInstruction("GetGlobalLong", offset),
+            .DefineGlobal => self.constantInstruction("DefineGlobal", offset),
+            .DefineGlobalLong => self.constantLongInstruction("DefineGlobalLong", offset),
+            .SetGlobal => self.constantInstruction("SetGlobal", offset),
+            .SetGlobalLong => self.constantLongInstruction("SetGlobalLong", offset),
             .Equal => simpleInstruction("Equal", offset),
             .Greater => simpleInstruction("Greater", offset),
             .Less => simpleInstruction("Less", offset),
@@ -125,6 +164,7 @@ pub const Chunk = struct {
             .Divide => simpleInstruction("Divide", offset),
             .Not => simpleInstruction("Not", offset),
             .Negate => simpleInstruction("Negate", offset),
+            .Print => simpleInstruction("Print", offset),
             .Return => simpleInstruction("Return", offset),
         };
     }

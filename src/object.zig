@@ -44,17 +44,44 @@ pub const Obj = struct {
     pub const String = struct {
         obj: Obj,
         buffer: []const u8,
+        hash: u32,
 
-        pub fn init(vm: *VM, buffer: []const u8) !*String {
-            var string = try Obj.init(vm, String, .String);
-            string.buffer = buffer;
-            return string;
+        pub fn take(vm: *VM, buffer: []const u8) !*String {
+            const hash = hashString(buffer);
+            if (vm.strings.findString(buffer, hash)) |string| {
+                vm.allocator.free(buffer);
+                return string;
+            }
+
+            return try allocate(vm, buffer, hash);
         }
 
         pub fn copy(vm: *VM, source: []const u8) !*String {
+            const hash = hashString(source);
+            if (vm.strings.findString(source, hash)) |string| {
+                return string;
+            }
+
             const buffer = try vm.allocator.alloc(u8, source.len);
             @memcpy(buffer, source);
-            return String.init(vm, buffer);
+            return allocate(vm, buffer, hash);
+        }
+
+        fn allocate(vm: *VM, buffer: []const u8, hash: u32) !*String {
+            var string = try Obj.init(vm, String, .String);
+            string.buffer = buffer;
+            string.hash = hash;
+            _ = try vm.strings.set(string, Value.nil());
+            return string;
+        }
+
+        fn hashString(bytes: []const u8) u32 {
+            var hash: u32 = 2166136261;
+            for (bytes) |b| {
+                hash ^= b;
+                hash *%= 16777619;
+            }
+            return hash;
         }
     };
 };

@@ -12,30 +12,16 @@ const TokenType = @import("scanner.zig").TokenType;
 const Value = @import("value.zig").Value;
 const VM = @import("vm.zig").VM;
 
-const Precedence = enum(u8) {
-    None,
-    Assignment, // =
-    Or, // or
-    And, // and
-    Equality, // == !=
-    Comparison, // < > <= >=
-    Term, // + -
-    Factor, // * /
-    Unary, // ! -
-    Call, // . ()
-    Primary,
-
-    pub fn next(self: Precedence) Precedence {
-        return @as(Precedence, @enumFromInt(@intFromEnum(self) + 1));
-    }
-};
-
 pub fn compile(vm: *VM, source: []const u8) !Chunk {
     var chunk = try Chunk.init(vm.allocator);
 
     var parser = Parser.init(vm, source, &chunk);
     parser.advance();
-    try parser.expression();
+
+    while (!parser.match(.Eof)) {
+        try parser.declaration();
+    }
+
     parser.consume(TokenType.Eof, "Expected end of expression.");
     try parser.end();
 
@@ -78,6 +64,8 @@ const Parser = struct {
     panicMode: bool,
     compilingChunk: *Chunk,
 
+    const Error = error{ OutOfMemory, InvalidCharacter };
+
     pub fn init(vm: *VM, source: []const u8, chunk: *Chunk) Parser {
         var scanner = Scanner.init(source);
         if (DEBUG_SHOW_TOKENS) {
@@ -96,24 +84,93 @@ const Parser = struct {
         };
     }
 
-    pub fn expression(self: *Parser) !void {
+    pub fn declaration(self: *Parser) !void {
+        if (self.match(.Var)) {
+            try self.varDeclaration();
+        } else {
+            try self.statement();
+        }
+
+        if (self.panicMode) {
+            self.synchronize();
+        }
+    }
+
+    fn varDeclaration(self: *Parser) !void {
+        const global = try self.parseVariable("Expected variable name.");
+
+        if (self.match(.Equal)) {
+            try self.expression();
+        } else {
+            try self.emitOp(.Nil);
+        }
+        self.consume(.Semicolon, "Expected ';' after variable declaration");
+
+        try self.defineVariable(global);
+    }
+
+    fn statement(self: *Parser) !void {
+        if (self.match(.Print)) {
+            try self.printStatement();
+        } else {
+            try self.expressionStatement();
+        }
+    }
+
+    fn printStatement(self: *Parser) !void {
+        try self.expression();
+        self.consume(.Semicolon, "Expected ';' after expression.");
+        try self.emitOp(.Print);
+    }
+
+    fn expressionStatement(self: *Parser) !void {
+        try self.expression();
+        self.consume(.Semicolon, "Expected ';' after expression.");
+        try self.emitOp(.Pop);
+    }
+
+    fn expression(self: *Parser) Error!void {
         try self.parsePrecedence(.Assignment);
     }
 
-    fn parsePrecedence(self: *Parser, precedence: Precedence) !void {
+    fn parsePrecedence(self: *Parser, precedence: Precedence) Error!void {
         self.advance();
 
-        const prefixRule = getRule(self.previous.type).prefix orelse {
-            self.errorAtPrevious("Expected expression.");
+        const canAssign = @intFromEnum(precedence) <= @intFromEnum(Precedence.Assignment);
+        if (!try self.prefix(self.previous.type, canAssign)) {
             return;
-        };
-        try prefixRule(self);
-
-        while (@intFromEnum(precedence) <= @intFromEnum(getRule(self.current.type).precedence)) {
-            self.advance();
-            const infixRule = getRule(self.previous.type).infix.?;
-            try infixRule(self);
         }
+
+        while (@intFromEnum(precedence) <= @intFromEnum(getPrecedence(self.current.type))) {
+            self.advance();
+            if (!try self.infix(self.previous.type)) {
+                return;
+            }
+        }
+
+        if (canAssign and self.match(.Equal)) {
+            self.err("Invalid assignment target");
+        }
+    }
+
+    fn parseVariable(self: *Parser, errorMessage: []const u8) !usize {
+        self.consume(.Identifier, errorMessage);
+        return self.identifierConstant(self.previous);
+    }
+
+    fn identifierConstant(self: *Parser, token: Token) !usize {
+        return try self.currentChunk().addConstant(
+            self.vm.allocator,
+            (try Obj.String.copy(self.vm, token.lexeme)).obj.toValue(),
+        );
+    }
+
+    fn defineVariable(self: *Parser, global: usize) !void {
+        try self.emitOpWithConstant(
+            .DefineGlobal,
+            .DefineGlobalLong,
+            global,
+        );
     }
 
     fn unary(self: *Parser) !void {
@@ -130,8 +187,7 @@ const Parser = struct {
 
     fn binary(self: *Parser) !void {
         const op = self.previous.type;
-        const rule = getRule(op);
-        try self.parsePrecedence(rule.precedence.next());
+        try self.parsePrecedence(getPrecedence(op).next());
 
         return switch (op) {
             .BangEqual => self.emitOps(.Equal, .Not),
@@ -171,9 +227,53 @@ const Parser = struct {
         try self.emitConstant(try self.stringValue());
     }
 
+    fn variable(self: *Parser, canAssign: bool) !void {
+        try self.namedVariable(self.previous, canAssign);
+    }
+
+    fn namedVariable(self: *Parser, name: Token, canAssign: bool) !void {
+        const constant = try self.identifierConstant(name);
+
+        if (canAssign and self.match(.Equal)) {
+            try self.expression();
+            try self.emitOpWithConstant(.SetGlobal, .SetGlobalLong, constant);
+        } else {
+            try self.emitOpWithConstant(.GetGlobal, .GetGlobalLong, constant);
+        }
+    }
+
     fn stringValue(self: *Parser) !Value {
         const value = self.previous.lexeme[1 .. self.previous.lexeme.len - 1];
         return (try Obj.String.copy(self.vm, value)).obj.toValue();
+    }
+
+    fn synchronize(self: *Parser) void {
+        self.panicMode = false;
+
+        while (self.current.type != .Eof) {
+            if (self.previous.type == .Semicolon) return;
+
+            switch (self.current.type) {
+                .Class,
+                .Fun,
+                .Var,
+                .For,
+                .If,
+                .While,
+                .Print,
+                .Return,
+                => return,
+                else => {},
+            }
+
+            self.advance();
+        }
+    }
+
+    pub fn match(self: *Parser, tokenType: TokenType) bool {
+        if (!self.check(tokenType)) return false;
+        self.advance();
+        return true;
     }
 
     pub fn consume(self: *Parser, tokenType: TokenType, message: []const u8) void {
@@ -197,6 +297,10 @@ const Parser = struct {
         }
     }
 
+    pub fn check(self: *Parser, tokenType: TokenType) bool {
+        return self.current.type == tokenType;
+    }
+
     pub fn end(self: *Parser) !void {
         try self.emitReturn();
 
@@ -206,6 +310,16 @@ const Parser = struct {
                 std.debug.print("\n", .{});
             }
         }
+    }
+
+    fn emitOpWithConstant(self: *Parser, op: OpCode, opLong: OpCode, constant: usize) !void {
+        try self.currentChunk().writeOpWithConstant(
+            self.vm.allocator,
+            op,
+            opLong,
+            constant,
+            self.previous.line,
+        );
     }
 
     fn emitConstant(self: *Parser, value: Value) !void {
@@ -242,7 +356,7 @@ const Parser = struct {
         self.errorAt(self.current, message);
     }
 
-    fn errorAtPrevious(self: *Parser, message: []const u8) void {
+    fn err(self: *Parser, message: []const u8) void {
         self.errorAt(self.previous, message);
     }
 
@@ -262,55 +376,111 @@ const Parser = struct {
         self.hadError = true;
     }
 
-    fn getRule(op: TokenType) ParseRule {
-        const empty: ParseRule = .{ .prefix = null, .infix = null, .precedence = .None };
-        return switch (op) {
-            .LeftParen => .{ .prefix = grouping, .infix = null, .precedence = .None },
-            .RightParen => empty,
-            .LeftBrace => empty,
-            .RightBrace => empty,
-            .Comma => empty,
-            .Dot => empty,
-            .Minus => .{ .prefix = unary, .infix = binary, .precedence = .Term },
-            .Plus => .{ .prefix = null, .infix = binary, .precedence = .Term },
-            .Semicolon => empty,
-            .Slash => .{ .prefix = null, .infix = binary, .precedence = .Factor },
-            .Star => .{ .prefix = null, .infix = binary, .precedence = .Factor },
-            .Bang => .{ .prefix = unary, .infix = null, .precedence = .None },
-            .BangEqual => .{ .prefix = null, .infix = binary, .precedence = .Equality },
-            .Equal => empty,
-            .EqualEqual => .{ .prefix = null, .infix = binary, .precedence = .Equality },
-            .Greater => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
-            .GreaterEqual => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
-            .Less => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
-            .LessEqual => .{ .prefix = null, .infix = binary, .precedence = .Comparison },
-            .Identifier => empty,
-            .String => .{ .prefix = string, .infix = null, .precedence = .None },
-            .Number => .{ .prefix = number, .infix = null, .precedence = .None },
-            .And => empty,
-            .Class => empty,
-            .Else => empty,
-            .False => .{ .prefix = literal, .infix = null, .precedence = .None },
-            .For => empty,
-            .Fun => empty,
-            .If => empty,
-            .Nil => .{ .prefix = literal, .infix = null, .precedence = .None },
-            .Or => empty,
-            .Print => empty,
-            .Return => empty,
-            .Super => empty,
-            .This => empty,
-            .True => .{ .prefix = literal, .infix = null, .precedence = .None },
-            .Var => empty,
-            .While => empty,
-            .Error => empty,
-            .Eof => empty,
-        };
+    /// returns whether there was a success
+    fn prefix(self: *Parser, op: TokenType, canAssign: bool) !bool {
+        switch (op) {
+            .LeftParen => try self.grouping(),
+            .Minus => try self.unary(),
+            .Bang => try self.unary(),
+            .Identifier => try self.variable(canAssign),
+            .String => try self.string(),
+            .Number => try self.number(),
+            .False => try self.literal(),
+            .Nil => try self.literal(),
+            .True => try self.literal(),
+            else => {
+                self.tokenError();
+                return false;
+            },
+        }
+        return true;
+    }
+
+    /// returns whether there was a success
+    fn infix(self: *Parser, op: TokenType) !bool {
+        switch (op) {
+            .Minus => try self.binary(),
+            .Plus => try self.binary(),
+            .Slash => try self.binary(),
+            .Star => try self.binary(),
+            .BangEqual => try self.binary(),
+            .EqualEqual => try self.binary(),
+            .Greater => try self.binary(),
+            .GreaterEqual => try self.binary(),
+            .Less => try self.binary(),
+            .LessEqual => try self.binary(),
+            else => {
+                self.tokenError();
+                return false;
+            },
+        }
+        return true;
+    }
+
+    fn tokenError(self: *Parser) void {
+        self.err("Expected expression.");
     }
 };
 
-const ParseRule = struct {
-    prefix: ?*const fn (self: *Parser) anyerror!void,
-    infix: ?*const fn (self: *Parser) anyerror!void,
-    precedence: Precedence,
+const Precedence = enum(u8) {
+    None,
+    Assignment, // =
+    Or, // or
+    And, // and
+    Equality, // == !=
+    Comparison, // < > <= >=
+    Term, // + -
+    Factor, // * /
+    Unary, // ! -
+    Call, // . ()
+    Primary,
+
+    pub fn next(self: Precedence) Precedence {
+        return @as(Precedence, @enumFromInt(@intFromEnum(self) + 1));
+    }
 };
+
+fn getPrecedence(op: TokenType) Precedence {
+    return switch (op) {
+        .LeftParen => .None,
+        .RightParen => .None,
+        .LeftBrace => .None,
+        .RightBrace => .None,
+        .Comma => .None,
+        .Dot => .None,
+        .Minus => .Term,
+        .Plus => .Term,
+        .Semicolon => .None,
+        .Slash => .Factor,
+        .Star => .Factor,
+        .Bang => .None,
+        .BangEqual => .Equality,
+        .Equal => .None,
+        .EqualEqual => .Equality,
+        .Greater => .Comparison,
+        .GreaterEqual => .Comparison,
+        .Less => .Comparison,
+        .LessEqual => .Comparison,
+        .Identifier => .None,
+        .String => .None,
+        .Number => .None,
+        .And => .None,
+        .Class => .None,
+        .Else => .None,
+        .False => .None,
+        .For => .None,
+        .Fun => .None,
+        .If => .None,
+        .Nil => .None,
+        .Or => .None,
+        .Print => .None,
+        .Return => .None,
+        .Super => .None,
+        .This => .None,
+        .True => .None,
+        .Var => .None,
+        .While => .None,
+        .Error => .None,
+        .Eof => .None,
+    };
+}

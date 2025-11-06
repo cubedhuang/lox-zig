@@ -8,6 +8,7 @@ const Chunk = @import("chunk.zig").Chunk;
 const Obj = @import("object.zig").Obj;
 const OpCode = @import("chunk.zig").OpCode;
 const Value = @import("value.zig").Value;
+const Table = @import("table.zig").Table;
 
 const compile = @import("compiler.zig").compile;
 
@@ -21,6 +22,8 @@ pub const VM = struct {
     chunk: Chunk,
     ip: usize,
     stack: ArrayList(Value),
+    globals: Table,
+    strings: Table,
     objects: ?*Obj,
 
     pub fn init(allocator: Allocator) !VM {
@@ -29,12 +32,16 @@ pub const VM = struct {
             .chunk = undefined,
             .ip = 0,
             .stack = try ArrayList(Value).initCapacity(allocator, 0),
+            .globals = Table.init(allocator),
+            .strings = Table.init(allocator),
             .objects = null,
         };
     }
 
     pub fn deinit(self: *VM) void {
         self.stack.deinit(self.allocator);
+        self.globals.deinit();
+        self.strings.deinit();
         self.freeObjects();
     }
 
@@ -67,17 +74,36 @@ pub const VM = struct {
             const op = @as(OpCode, @enumFromInt(instruction));
 
             switch (op) {
-                .Constant => {
-                    const value = self.readConstant();
-                    try self.push(value);
-                },
-                .ConstantLong => {
-                    const value = self.readConstantLong();
+                .Constant, .ConstantLong => {
+                    const value = self.readConstant(op == .ConstantLong);
                     try self.push(value);
                 },
                 .Nil => try self.push(Value.nil()),
                 .True => try self.push(Value.fromBool(true)),
                 .False => try self.push(Value.fromBool(false)),
+                .Pop => _ = self.pop(),
+                .GetGlobal, .GetGlobalLong => {
+                    const name = self.readString(op == .GetGlobalLong);
+                    if (self.globals.get(name)) |value| {
+                        try self.push(value);
+                    } else {
+                        self.runtimeError("Undefined variable '{s}'.", .{name.buffer});
+                        return error.RuntimeError;
+                    }
+                },
+                .DefineGlobal, .DefineGlobalLong => {
+                    const name = self.readString(op == .DefineGlobalLong);
+                    _ = try self.globals.set(name, self.peek(0));
+                    _ = self.pop();
+                },
+                .SetGlobal, .SetGlobalLong => {
+                    const name = self.readString(op == .SetGlobalLong);
+                    if (try self.globals.set(name, self.peek(0))) {
+                        _ = self.globals.delete(name);
+                        self.runtimeError("Undefined variable '{s}'.", .{name.buffer});
+                        return error.RuntimeError;
+                    }
+                },
                 .Equal => try self.push(Value.fromBool(self.pop().equals(self.pop()))),
                 .Greater => try self.binary(Value.fromBool, gt),
                 .Less => try self.binary(Value.fromBool, lt),
@@ -109,8 +135,10 @@ pub const VM = struct {
                     const value = self.pop();
                     try self.push(Value.fromNumber(-value.asNumber()));
                 },
+                .Print => {
+                    std.debug.print("{f}\n", .{self.pop()});
+                },
                 .Return => {
-                    std.debug.print("{f}\n", .{self.stack.pop().?});
                     return;
                 },
             }
@@ -132,7 +160,7 @@ pub const VM = struct {
         const a = self.pop().asObj().asString();
 
         const buffer = try std.mem.concat(self.allocator, u8, &.{ a.buffer, b.buffer });
-        const string = try Obj.String.init(self, buffer);
+        const string = try Obj.String.take(self, buffer);
         try self.push(string.obj.toValue());
     }
 
@@ -153,15 +181,19 @@ pub const VM = struct {
         return self.chunk.code.items[self.ip];
     }
 
-    fn readConstant(self: *VM) Value {
-        return self.chunk.constants.items[self.readByte()];
+    fn readString(self: *VM, long: bool) *Obj.String {
+        return self.readConstant(long).asObj().asString();
     }
 
-    fn readConstantLong(self: *VM) Value {
-        const constant = (@as(usize, self.chunk.code.items[self.readByte()]) << 16) +
-            (@as(usize, self.chunk.code.items[self.readByte()]) << 8) +
-            self.chunk.code.items[self.readByte()];
-        return self.chunk.constants.items[constant];
+    fn readConstant(self: *VM, long: bool) Value {
+        if (long) {
+            const constant = (@as(usize, self.chunk.code.items[self.readByte()]) << 16) +
+                (@as(usize, self.chunk.code.items[self.readByte()]) << 8) +
+                self.chunk.code.items[self.readByte()];
+            return self.chunk.constants.items[constant];
+        } else {
+            return self.chunk.constants.items[self.readByte()];
+        }
     }
 
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) void {
