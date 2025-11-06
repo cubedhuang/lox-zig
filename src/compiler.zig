@@ -145,6 +145,8 @@ const Parser = struct {
             try self.printStatement();
         } else if (self.match(.If)) {
             try self.ifStatement();
+        } else if (self.match(.While)) {
+            try self.whileStatement();
         } else if (self.match(.LeftBrace)) {
             self.beginScope();
             try self.block();
@@ -167,12 +169,33 @@ const Parser = struct {
 
         const thenJump = try self.emitJump(.JumpIfFalse);
         try self.emitOp(.Pop);
+
         try self.statement();
+
         const elseJump = try self.emitJump(.Jump);
         self.patchJump(thenJump);
         try self.emitOp(.Pop);
+
         if (self.match(.Else)) try self.statement();
+
         self.patchJump(elseJump);
+    }
+
+    fn whileStatement(self: *Parser) !void {
+        const loopStart = self.currentChunk().code.items.len;
+
+        self.consume(.LeftParen, "Expected '(' after 'while'.");
+        try self.expression();
+        self.consume(.RightParen, "Expected ')' after condition.");
+
+        const exitJump = try self.emitJump(.JumpIfFalse);
+        try self.emitOp(.Pop);
+
+        try self.statement();
+        try self.emitLoop(loopStart);
+
+        self.patchJump(exitJump);
+        try self.emitOp(.Pop);
     }
 
     fn block(self: *Parser) !void {
@@ -492,7 +515,6 @@ const Parser = struct {
 
     fn patchJump(self: *Parser, offset: usize) void {
         const jump = self.currentChunk().code.items.len - 3 - offset;
-
         if (jump > std.math.maxInt(u24)) {
             self.err("Too much code to jump over.");
         }
@@ -500,6 +522,19 @@ const Parser = struct {
         self.currentChunk().code.items[offset] = @intCast(jump >> 16);
         self.currentChunk().code.items[offset + 1] = @intCast((jump >> 8) & 0xFF);
         self.currentChunk().code.items[offset + 2] = @intCast(jump & 0xFF);
+    }
+
+    fn emitLoop(self: *Parser, loopStart: usize) !void {
+        try self.emitOp(.Loop);
+
+        const offset = self.currentChunk().code.items.len - loopStart + 3;
+        if (offset > std.math.maxInt(u24)) {
+            self.err("Loop body too large.");
+        }
+
+        try self.emitByte(@intCast(offset >> 16));
+        try self.emitByte(@intCast((offset >> 8) & 0xFF));
+        try self.emitByte(@intCast(offset & 0xFF));
     }
 
     fn emitOpWithConstant(self: *Parser, op: OpCode, opLong: OpCode, constant: usize) !void {

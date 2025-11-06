@@ -63,6 +63,9 @@ pub const VM = struct {
     }
 
     fn run(self: *VM) !void {
+        std.debug.assert(self.stack.items.len == 0);
+        defer std.debug.assert(self.stack.items.len == 0);
+
         while (true) {
             if (DEBUG_TRACE_EXECUTION) {
                 self.printStack();
@@ -153,6 +156,10 @@ pub const VM = struct {
                 .JumpIfFalse => {
                     const offset = self.readBytes(true);
                     if (self.peek(0).isFalsey()) self.ip += offset;
+                },
+                .Loop => {
+                    const offset = self.readBytes(true);
+                    self.ip -= offset;
                 },
                 .Return => {
                     return;

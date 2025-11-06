@@ -32,6 +32,7 @@ pub const OpCode = enum(u8) {
     Print,
     Jump,
     JumpIfFalse,
+    Loop,
     Return,
 };
 
@@ -177,6 +178,7 @@ pub const Chunk = struct {
             .Print => simpleInstruction("Print", offset),
             .Jump => self.jumpInstruction("Jump", 1, offset),
             .JumpIfFalse => self.jumpInstruction("JumpIfFalse", 1, offset),
+            .Loop => self.jumpInstruction("Loop", -1, offset),
             .Return => simpleInstruction("Return", offset),
         };
     }
