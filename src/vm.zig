@@ -82,6 +82,14 @@ pub const VM = struct {
                 .True => try self.push(Value.fromBool(true)),
                 .False => try self.push(Value.fromBool(false)),
                 .Pop => _ = self.pop(),
+                .GetLocal, .GetLocalLong => {
+                    const slot = self.readBytes(op == .GetLocalLong);
+                    try self.push(self.stack.items[slot]);
+                },
+                .SetLocal, .SetLocalLong => {
+                    const slot = self.readBytes(op == .SetLocalLong);
+                    self.stack.items[slot] = self.peek(0);
+                },
                 .GetGlobal, .GetGlobalLong => {
                     const name = self.readString(op == .GetGlobalLong);
                     if (self.globals.get(name)) |value| {
@@ -176,24 +184,26 @@ pub const VM = struct {
         self.stack.clearRetainingCapacity();
     }
 
-    fn readByte(self: *VM) u8 {
-        defer self.ip += 1;
-        return self.chunk.code.items[self.ip];
-    }
-
     fn readString(self: *VM, long: bool) *Obj.String {
         return self.readConstant(long).asObj().asString();
     }
 
     fn readConstant(self: *VM, long: bool) Value {
-        if (long) {
-            const constant = (@as(usize, self.readByte()) << 16) +
+        return self.chunk.constants.items[self.readBytes(long)];
+    }
+
+    fn readBytes(self: *VM, long: bool) usize {
+        return if (long)
+            (@as(usize, self.readByte()) << 16) +
                 (@as(usize, self.readByte()) << 8) +
-                self.readByte();
-            return self.chunk.constants.items[constant];
-        } else {
-            return self.chunk.constants.items[self.readByte()];
-        }
+                self.readByte()
+        else
+            self.readByte();
+    }
+
+    fn readByte(self: *VM) u8 {
+        defer self.ip += 1;
+        return self.chunk.code.items[self.ip];
     }
 
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) void {

@@ -54,6 +54,10 @@ pub const Token = struct {
     type: TokenType,
     lexeme: []const u8,
     line: usize,
+
+    pub fn equals(self: Token, other: Token) bool {
+        return std.mem.eql(u8, self.lexeme, other.lexeme);
+    }
 };
 
 fn isDigit(c: u8) bool {

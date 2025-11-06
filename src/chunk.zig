@@ -10,6 +10,10 @@ pub const OpCode = enum(u8) {
     True,
     False,
     Pop,
+    GetLocal,
+    GetLocalLong,
+    SetLocal,
+    SetLocalLong,
     GetGlobal,
     GetGlobalLong,
     DefineGlobal,
@@ -149,6 +153,10 @@ pub const Chunk = struct {
             .True => simpleInstruction("True", offset),
             .False => simpleInstruction("False", offset),
             .Pop => simpleInstruction("Pop", offset),
+            .GetLocal => self.byteInstruction("GetLocal", offset),
+            .GetLocalLong => self.byteLongInstruction("GetLocalLong", offset),
+            .SetLocal => self.byteInstruction("SetLocal", offset),
+            .SetLocalLong => self.byteLongInstruction("SetLocalLong", offset),
             .GetGlobal => self.constantInstruction("GetGlobal", offset),
             .GetGlobalLong => self.constantLongInstruction("GetGlobalLong", offset),
             .DefineGlobal => self.constantInstruction("DefineGlobal", offset),
@@ -203,6 +211,24 @@ pub const Chunk = struct {
         const value = self.constants.items[constant];
 
         std.debug.print("{s} {d:8} '{f}'\n", .{ name, constant, value });
+
+        return offset + 4;
+    }
+
+    fn byteInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
+        const slot = self.code.items[offset + 1];
+
+        std.debug.print("{s} {d:12}\n", .{ name, slot });
+
+        return offset + 2;
+    }
+
+    fn byteLongInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
+        const slot = (@as(usize, self.code.items[offset + 1]) << 16) +
+            (@as(usize, self.code.items[offset + 2]) << 8) +
+            self.code.items[offset + 3];
+
+        std.debug.print("{s} {d:8}\n", .{ name, slot });
 
         return offset + 4;
     }
