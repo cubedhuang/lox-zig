@@ -17,10 +17,16 @@ pub const InterpretError = error{
     RuntimeError,
 };
 
+const CallFrame = struct {
+    function: *Obj.Function,
+    ip: usize,
+    slots: []Value,
+};
+
 pub const VM = struct {
     allocator: Allocator,
-    chunk: Chunk,
-    ip: usize,
+
+    frames: ArrayList(CallFrame),
     stack: ArrayList(Value),
     globals: Table,
     strings: Table,
@@ -29,8 +35,7 @@ pub const VM = struct {
     pub fn init(allocator: Allocator) !VM {
         return VM{
             .allocator = allocator,
-            .chunk = undefined,
-            .ip = 0,
+            .frames = try ArrayList(CallFrame).initCapacity(allocator, 0),
             .stack = try ArrayList(Value).initCapacity(allocator, 0),
             .globals = Table.init(allocator),
             .strings = Table.init(allocator),
@@ -39,6 +44,7 @@ pub const VM = struct {
     }
 
     pub fn deinit(self: *VM) void {
+        self.frames.deinit(self.allocator);
         self.stack.deinit(self.allocator);
         self.globals.deinit();
         self.strings.deinit();
@@ -55,22 +61,23 @@ pub const VM = struct {
     }
 
     pub fn interpret(self: *VM, source: []const u8) !void {
-        self.chunk = try compile(self, source);
-        defer self.chunk.deinit(self.allocator);
-        self.ip = 0;
+        std.debug.assert(self.stack.items.len == 0);
+        defer std.debug.assert(self.stack.items.len == 0);
+
+        const function = try compile(self, source);
+
+        try self.push(function.obj.toValue());
+        try self.call(function, 0);
 
         try self.run();
     }
 
     fn run(self: *VM) !void {
-        std.debug.assert(self.stack.items.len == 0);
-        defer std.debug.assert(self.stack.items.len == 0);
-
         while (true) {
             if (DEBUG_TRACE_EXECUTION) {
                 self.printStack();
 
-                _ = self.chunk.disassembleInstruction(self.ip);
+                _ = self.currentChunk().disassembleInstruction(self.currentFrame().ip);
             }
 
             const instruction = self.readByte();
@@ -87,11 +94,11 @@ pub const VM = struct {
                 .Pop => _ = self.pop(),
                 .GetLocal, .GetLocalLong => {
                     const slot = self.readBytes(op == .GetLocalLong);
-                    try self.push(self.stack.items[slot]);
+                    try self.push(self.currentFrame().slots[slot]);
                 },
                 .SetLocal, .SetLocalLong => {
                     const slot = self.readBytes(op == .SetLocalLong);
-                    self.stack.items[slot] = self.peek(0);
+                    self.currentFrame().slots[slot] = self.peek(0);
                 },
                 .GetGlobal, .GetGlobalLong => {
                     const name = self.readString(op == .GetGlobalLong);
@@ -151,18 +158,30 @@ pub const VM = struct {
                 },
                 .Jump => {
                     const offset = self.readBytes(true);
-                    self.ip += offset;
+                    self.currentFrame().ip += offset;
                 },
                 .JumpIfFalse => {
                     const offset = self.readBytes(true);
-                    if (self.peek(0).isFalsey()) self.ip += offset;
+                    if (self.peek(0).isFalsey()) self.currentFrame().ip += offset;
                 },
                 .Loop => {
                     const offset = self.readBytes(true);
-                    self.ip -= offset;
+                    self.currentFrame().ip -= offset;
+                },
+                .Call => {
+                    const count = self.readByte();
+                    try self.callValue(self.peek(count), count);
                 },
                 .Return => {
-                    return;
+                    const result = self.pop();
+                    const frame = self.frames.pop().?;
+                    if (self.frames.items.len == 0) {
+                        _ = self.pop();
+                        return;
+                    }
+
+                    self.stack.items.len = frame.slots.ptr - self.stack.items.ptr;
+                    try self.push(result);
                 },
             }
         }
@@ -187,6 +206,34 @@ pub const VM = struct {
         try self.push(string.obj.toValue());
     }
 
+    fn callValue(self: *VM, callee: Value, argCount: u8) !void {
+        if (callee.isObj()) {
+            switch (callee.asObj().type) {
+                .Function => return self.call(callee.asObj().asFunction(), argCount),
+                else => {},
+            }
+        }
+        self.runtimeError("Can only call functions and classes.", .{});
+        return error.RuntimeError;
+    }
+
+    fn call(self: *VM, callee: *Obj.Function, count: u8) !void {
+        if (count != callee.arity) {
+            self.runtimeError("Expected {d} arguments but got {d}.", .{ callee.arity, count });
+            return error.RuntimeError;
+        }
+
+        // TODO: maybe add a stack limit or something.
+        // it's not necessary now since our stack is an arraylist
+
+        const frame = CallFrame{
+            .function = callee,
+            .ip = 0,
+            .slots = self.stack.items[self.stack.items.len - @as(usize, @intCast(count)) - 1 ..],
+        };
+        try self.frames.append(self.allocator, frame);
+    }
+
     fn printStack(self: *VM) void {
         std.debug.print("          ", .{});
         for (self.stack.items) |value| {
@@ -204,7 +251,7 @@ pub const VM = struct {
     }
 
     fn readConstant(self: *VM, long: bool) Value {
-        return self.chunk.constants.items[self.readBytes(long)];
+        return self.currentChunk().constants.items[self.readBytes(long)];
     }
 
     fn readBytes(self: *VM, long: bool) usize {
@@ -217,16 +264,37 @@ pub const VM = struct {
     }
 
     fn readByte(self: *VM) u8 {
-        defer self.ip += 1;
-        return self.chunk.code.items[self.ip];
+        defer self.currentFrame().ip += 1;
+        return self.currentChunk().code.items[self.currentFrame().ip];
     }
 
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) void {
         std.debug.print(fmt, args);
+        std.debug.print("\n", .{});
 
-        const line = self.chunk.getLine(self.ip - 1);
-        std.debug.print("\n[line {d}] in script\n", .{line});
+        var i = self.frames.items.len;
+        while (i > 0) {
+            i -= 1;
+            const frame = &self.frames.items[i];
+            const function = frame.function;
+            const line = function.chunk.getLine(frame.ip - 1);
+            std.debug.print("[line {d}] in ", .{line});
+            if (function.name) |name| {
+                std.debug.print("{s}()\n", .{name.buffer});
+            } else {
+                std.debug.print("script\n", .{});
+            }
+        }
+
         self.resetStack();
+    }
+
+    fn currentFrame(self: *VM) *CallFrame {
+        return &self.frames.items[self.frames.items.len - 1];
+    }
+
+    fn currentChunk(self: *VM) *Chunk {
+        return &self.currentFrame().function.chunk;
     }
 
     fn peek(self: *VM, distance: usize) Value {

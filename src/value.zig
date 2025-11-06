@@ -28,7 +28,7 @@ const UnionValue = union(enum) {
             .Nil => writer.print("nil", .{}),
             .Bool => |val| writer.print("{}", .{val}),
             .Number => |val| writer.print("{d}", .{val}),
-            .Obj => |val| formatObj(val, writer),
+            .Obj => |val| val.format(writer),
         };
     }
 
@@ -80,9 +80,3 @@ const UnionValue = union(enum) {
         return self.Obj;
     }
 };
-
-fn formatObj(obj: *Obj, writer: anytype) !void {
-    return switch (obj.type) {
-        .String => writer.print("{s}", .{obj.asString().buffer}),
-    };
-}

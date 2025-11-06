@@ -14,24 +14,23 @@ const TokenType = @import("scanner.zig").TokenType;
 const Value = @import("value.zig").Value;
 const VM = @import("vm.zig").VM;
 
-pub fn compile(vm: *VM, source: []const u8) !Chunk {
-    var chunk = try Chunk.init(vm.allocator);
+pub fn compile(vm: *VM, source: []const u8) !*Obj.Function {
+    var compiler = try Compiler.init(vm, .Script);
+    defer compiler.deinit(vm.allocator);
 
-    var parser = try Parser.init(vm, source, &chunk);
-    defer parser.deinit();
+    var parser = try Parser.init(vm, source, &compiler);
 
     parser.advance();
     while (!parser.match(.Eof)) {
         try parser.declaration();
     }
     parser.consume(TokenType.Eof, "Expected end of expression.");
-    try parser.end();
+    const function = try parser.endCompiler();
 
     if (parser.hadError) {
-        chunk.deinit(vm.allocator);
         return error.CompilerError;
     }
-    return chunk;
+    return function;
 }
 
 fn showTokens(scanner: *Scanner) void {
@@ -57,12 +56,27 @@ fn showTokens(scanner: *Scanner) void {
 }
 
 const Compiler = struct {
+    enclosing: ?*Compiler,
+
+    function: *Obj.Function,
+    type: FunctionType,
+
     locals: ArrayList(Local),
     scopeDepth: usize,
 
-    pub fn init(allocator: std.mem.Allocator) !Compiler {
+    pub fn init(vm: *VM, functionType: FunctionType) !Compiler {
+        var locals = try ArrayList(Local).initCapacity(vm.allocator, 0);
+
+        try locals.append(vm.allocator, Local{
+            .name = "",
+            .depth = 0,
+        });
+
         return Compiler{
-            .locals = try ArrayList(Local).initCapacity(allocator, 0),
+            .enclosing = null,
+            .function = try Obj.Function.init(vm),
+            .type = functionType,
+            .locals = locals,
             .scopeDepth = 0,
         };
     }
@@ -73,10 +87,15 @@ const Compiler = struct {
 };
 
 const Local = struct {
-    name: Token,
+    name: []const u8,
     depth: usize,
 
     pub const UNINITIALIZED = std.math.maxInt(usize);
+};
+
+const FunctionType = enum {
+    Function,
+    Script,
 };
 
 const Parser = struct {
@@ -87,12 +106,11 @@ const Parser = struct {
     previous: Token,
     hadError: bool,
     panicMode: bool,
-    compilingChunk: *Chunk,
-    compiler: Compiler,
+    compiler: *Compiler,
 
-    const Error = error{ OutOfMemory, InvalidCharacter };
+    const Error = error{ CompileError, OutOfMemory, InvalidCharacter };
 
-    pub fn init(vm: *VM, source: []const u8, chunk: *Chunk) !Parser {
+    pub fn init(vm: *VM, source: []const u8, compiler: *Compiler) !Parser {
         var scanner = Scanner.init(source);
         if (DEBUG_SHOW_TOKENS) {
             showTokens(&scanner);
@@ -106,17 +124,14 @@ const Parser = struct {
             .previous = undefined,
             .hadError = false,
             .panicMode = false,
-            .compilingChunk = chunk,
-            .compiler = try Compiler.init(vm.allocator),
+            .compiler = compiler,
         };
     }
 
-    pub fn deinit(self: *Parser) void {
-        self.compiler.deinit(self.vm.allocator);
-    }
-
     pub fn declaration(self: *Parser) Error!void {
-        if (self.match(.Var)) {
+        if (self.match(.Fun)) {
+            try self.funDeclaration();
+        } else if (self.match(.Var)) {
             try self.varDeclaration();
         } else {
             try self.statement();
@@ -125,6 +140,48 @@ const Parser = struct {
         if (self.panicMode) {
             self.synchronize();
         }
+    }
+
+    fn funDeclaration(self: *Parser) !void {
+        const global = try self.parseVariable("Expected function name.");
+        self.markInitialized();
+        try self.func(.Function);
+        try self.defineVariable(global);
+    }
+
+    fn func(self: *Parser, functionType: FunctionType) !void {
+        var compiler = try Compiler.init(self.vm, functionType);
+        compiler.enclosing = self.compiler;
+        compiler.function.name = try Obj.String.copy(self.vm, self.previous.lexeme);
+        defer compiler.deinit(self.vm.allocator);
+
+        self.compiler = &compiler;
+
+        self.beginScope();
+
+        self.consume(.LeftParen, "Expected '(' after function name.");
+
+        if (!self.check(.RightParen)) {
+            while (true) {
+                self.compiler.function.arity += 1;
+                if (self.compiler.function.arity > 255) {
+                    self.errorAtCurrent("Can't have more than 255 parameters.");
+                }
+                const constant = try self.parseVariable("Expected parameter name.");
+                try self.defineVariable(constant);
+
+                if (!self.match(.Comma)) {
+                    break;
+                }
+            }
+        }
+
+        self.consume(.RightParen, "Expected ')' after parameters.");
+        self.consume(.LeftBrace, "Expected '{' before function body.");
+        try self.block();
+
+        const function = try self.endCompiler();
+        try self.emitConstant(function.obj.toValue());
     }
 
     fn varDeclaration(self: *Parser) !void {
@@ -147,6 +204,8 @@ const Parser = struct {
             try self.forStatement();
         } else if (self.match(.If)) {
             try self.ifStatement();
+        } else if (self.match(.Return)) {
+            try self.returnStatement();
         } else if (self.match(.While)) {
             try self.whileStatement();
         } else if (self.match(.LeftBrace)) {
@@ -229,6 +288,20 @@ const Parser = struct {
         self.patchJump(elseJump);
     }
 
+    fn returnStatement(self: *Parser) !void {
+        if (self.compiler.type == .Script) {
+            self.err("Can't return from top-level code.");
+        }
+
+        if (self.match(.Semicolon)) {
+            try self.emitReturn();
+        } else {
+            try self.expression();
+            self.consume(.Semicolon, "Expected ';' after return value.");
+            try self.emitOp(.Return);
+        }
+    }
+
     fn whileStatement(self: *Parser) !void {
         const loopStart = self.currentChunk().code.items.len;
 
@@ -300,13 +373,13 @@ const Parser = struct {
         );
     }
 
-    fn resolveLocal(self: *Parser, compiler: Compiler, name: Token) ?usize {
+    fn resolveLocal(self: *Parser, compiler: *Compiler, name: Token) ?usize {
         var i = compiler.locals.items.len;
         while (i > 0) {
             i -= 1;
 
             const local = compiler.locals.items[i];
-            if (name.equals(local.name)) {
+            if (std.mem.eql(u8, name.lexeme, local.name)) {
                 if (local.depth == Local.UNINITIALIZED) {
                     self.err("Can't read local variable in its own initializer");
                 }
@@ -331,7 +404,7 @@ const Parser = struct {
                 break;
             }
 
-            if (name.equals(local.name)) {
+            if (std.mem.eql(u8, name.lexeme, local.name)) {
                 self.err("Already a variable with this name in this scope.");
             }
         }
@@ -341,7 +414,7 @@ const Parser = struct {
 
     fn addLocal(self: *Parser, name: Token) !void {
         const local = Local{
-            .name = name,
+            .name = name.lexeme,
             .depth = Local.UNINITIALIZED,
         };
         try self.compiler.locals.append(self.vm.allocator, local);
@@ -360,7 +433,32 @@ const Parser = struct {
         );
     }
 
+    fn call(self: *Parser) !void {
+        const count = try self.argumentList();
+        try self.emitUnaryOp(.Call, count);
+    }
+
+    fn argumentList(self: *Parser) !u8 {
+        var count: u8 = 0;
+        if (!self.check(.RightParen)) {
+            while (true) {
+                try self.expression();
+                if (count > 255) {
+                    self.err("Can't have more than 255 arguments.");
+                }
+                count += 1;
+                if (!self.match(.Comma)) {
+                    break;
+                }
+            }
+        }
+        self.consume(.RightParen, "Expected ')' after arguments.");
+        return count;
+    }
+
     fn markInitialized(self: *Parser) void {
+        if (self.compiler.scopeDepth == 0) return;
+
         self.compiler.locals.items[self.compiler.locals.items.len - 1].depth =
             self.compiler.scopeDepth;
     }
@@ -473,15 +571,23 @@ const Parser = struct {
         return (try Obj.String.copy(self.vm, value)).obj.toValue();
     }
 
-    pub fn end(self: *Parser) !void {
+    pub fn endCompiler(self: *Parser) !*Obj.Function {
         try self.emitReturn();
+        const function = self.compiler.function;
 
         if (DEBUG_PRINT_CODE) {
             if (!self.hadError) {
-                self.currentChunk().disassemble("code");
+                self.currentChunk().disassemble(if (function.name) |name|
+                    name.buffer
+                else
+                    "<script>");
                 std.debug.print("\n", .{});
             }
         }
+
+        if (self.compiler.enclosing) |enclosing|
+            self.compiler = enclosing;
+        return function;
     }
 
     fn beginScope(self: *Parser) void {
@@ -610,6 +716,7 @@ const Parser = struct {
     }
 
     fn emitReturn(self: *Parser) !void {
+        try self.emitOp(OpCode.Nil);
         try self.emitOp(OpCode.Return);
     }
 
@@ -622,7 +729,7 @@ const Parser = struct {
     }
 
     fn currentChunk(self: *Parser) *Chunk {
-        return self.compilingChunk;
+        return &self.compiler.function.chunk;
     }
 
     fn errorAtCurrent(self: *Parser, message: []const u8) void {
@@ -670,6 +777,7 @@ const Parser = struct {
     /// returns whether there was a success
     fn infix(self: *Parser, op: TokenType) !bool {
         switch (op) {
+            .LeftParen => try self.call(),
             .Minus => try self.binary(),
             .Plus => try self.binary(),
             .Slash => try self.binary(),
@@ -715,7 +823,7 @@ const Precedence = enum(u8) {
 
 fn getPrecedence(op: TokenType) Precedence {
     return switch (op) {
-        .LeftParen => .None,
+        .LeftParen => .Call,
         .RightParen => .None,
         .LeftBrace => .None,
         .RightBrace => .None,

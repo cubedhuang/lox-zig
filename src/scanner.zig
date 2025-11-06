@@ -201,7 +201,7 @@ pub const Scanner = struct {
                 switch (self.source[self.start + 1]) {
                     'a' => self.checkKeyword(2, "lse", .False),
                     'o' => self.checkKeyword(2, "r", .For),
-                    'u' => self.checkKeyword(1, "n", .Fun),
+                    'u' => self.checkKeyword(2, "n", .Fun),
                     else => .Identifier,
                 }
             else
