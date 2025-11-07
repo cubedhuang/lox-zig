@@ -8,7 +8,11 @@ pub const Obj = struct {
     type: Type,
     next: ?*Obj,
 
-    pub const Type = enum { Function, String };
+    pub const Type = enum {
+        Function,
+        Native,
+        String,
+    };
 
     pub fn init(vm: *VM, comptime T: type, objectType: Type) !*T {
         var object = try vm.allocator.create(T);
@@ -27,6 +31,10 @@ pub const Obj = struct {
                 function.chunk.deinit(allocator);
                 allocator.destroy(function);
             },
+            .Native => {
+                const function = self.asNative();
+                allocator.destroy(function);
+            },
             .String => {
                 const string = self.asString();
                 allocator.free(string.buffer);
@@ -41,6 +49,7 @@ pub const Obj = struct {
                 writer.print("<fn {s}>", .{name.buffer})
             else
                 writer.print("<script>", .{}),
+            .Native => writer.print("<native fn>", .{}),
             .String => writer.print("{s}", .{self.asString().buffer}),
         };
     }
@@ -53,11 +62,19 @@ pub const Obj = struct {
         return self.type == .Function;
     }
 
+    pub fn isNative(self: *Obj) bool {
+        return self.type == .Native;
+    }
+
     pub fn isString(self: *Obj) bool {
         return self.type == .String;
     }
 
     pub fn asFunction(self: *Obj) *Function {
+        return @fieldParentPtr("obj", self);
+    }
+
+    pub fn asNative(self: *Obj) *Native {
         return @fieldParentPtr("obj", self);
     }
 
@@ -77,6 +94,19 @@ pub const Obj = struct {
             function.name = null;
             function.chunk = try Chunk.init(vm.allocator);
             return function;
+        }
+    };
+
+    pub const NativeFn = *const fn (argCount: u8, args: []Value) Value;
+
+    pub const Native = struct {
+        obj: Obj,
+        function: NativeFn,
+
+        pub fn init(vm: *VM, function: NativeFn) !*Native {
+            const native = try Obj.init(vm, Native, .Native);
+            native.function = function;
+            return native;
         }
     };
 

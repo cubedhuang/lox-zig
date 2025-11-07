@@ -33,7 +33,7 @@ pub const VM = struct {
     objects: ?*Obj,
 
     pub fn init(allocator: Allocator) !VM {
-        return VM{
+        var self = VM{
             .allocator = allocator,
             .frames = try ArrayList(CallFrame).initCapacity(allocator, 0),
             .stack = try ArrayList(Value).initCapacity(allocator, 0),
@@ -41,6 +41,10 @@ pub const VM = struct {
             .strings = Table.init(allocator),
             .objects = null,
         };
+
+        try self.defineNative("clock", clockNative);
+
+        return self;
     }
 
     pub fn deinit(self: *VM) void {
@@ -210,6 +214,16 @@ pub const VM = struct {
         if (callee.isObj()) {
             switch (callee.asObj().type) {
                 .Function => return self.call(callee.asObj().asFunction(), argCount),
+                .Native => {
+                    const native = callee.asObj().asNative();
+                    const result = native.function(
+                        argCount,
+                        self.stack.items[self.stack.items.len - argCount ..],
+                    );
+                    self.stack.items.len -= argCount + 1;
+                    try self.push(result);
+                    return;
+                },
                 else => {},
             }
         }
@@ -266,6 +280,14 @@ pub const VM = struct {
     fn readByte(self: *VM) u8 {
         defer self.currentFrame().ip += 1;
         return self.currentChunk().code.items[self.currentFrame().ip];
+    }
+
+    fn defineNative(self: *VM, name: []const u8, function: Obj.NativeFn) !void {
+        try self.push((try Obj.String.copy(self, name)).obj.toValue());
+        try self.push((try Obj.Native.init(self, function)).obj.toValue());
+        _ = try self.globals.set(self.stack.items[0].asObj().asString(), self.stack.items[1]);
+        _ = self.pop();
+        _ = self.pop();
     }
 
     fn runtimeError(self: *VM, comptime fmt: []const u8, args: anytype) void {
@@ -340,4 +362,13 @@ fn gt(a: f64, b: f64) bool {
 
 fn lt(a: f64, b: f64) bool {
     return a < b;
+}
+
+fn clockNative(argCount: u8, args: []Value) Value {
+    _ = argCount;
+    _ = args;
+    const ctime = @cImport({
+        @cInclude("time.h");
+    });
+    return Value.fromNumber(@floatFromInt(ctime.clock()));
 }
