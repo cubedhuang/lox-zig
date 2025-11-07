@@ -20,7 +20,7 @@ pub const InterpretError = error{
 const CallFrame = struct {
     function: *Obj.Function,
     ip: usize,
-    slots: []Value,
+    base: usize,
 };
 
 pub const VM = struct {
@@ -93,12 +93,12 @@ pub const VM = struct {
                 .False => try self.push(Value.fromBool(false)),
                 .Pop => _ = self.pop(),
                 .GetLocal, .GetLocalLong => {
-                    const slot = self.readBytes(op == .GetLocalLong);
-                    try self.push(self.currentFrame().slots[slot]);
+                    const index = self.readBytes(op == .GetLocalLong);
+                    try self.push(self.slot(index));
                 },
                 .SetLocal, .SetLocalLong => {
-                    const slot = self.readBytes(op == .SetLocalLong);
-                    self.currentFrame().slots[slot] = self.peek(0);
+                    const index = self.readBytes(op == .SetLocalLong);
+                    self.slotPtr(index).* = self.peek(0);
                 },
                 .GetGlobal, .GetGlobalLong => {
                     const name = self.readString(op == .GetGlobalLong);
@@ -180,7 +180,7 @@ pub const VM = struct {
                         return;
                     }
 
-                    self.stack.items.len = frame.slots.ptr - self.stack.items.ptr;
+                    self.stack.items.len = frame.base;
                     try self.push(result);
                 },
             }
@@ -229,7 +229,7 @@ pub const VM = struct {
         const frame = CallFrame{
             .function = callee,
             .ip = 0,
-            .slots = self.stack.items[self.stack.items.len - @as(usize, @intCast(count)) - 1 ..],
+            .base = self.stack.items.len - @as(usize, @intCast(count)) - 1,
         };
         try self.frames.append(self.allocator, frame);
     }
@@ -287,6 +287,14 @@ pub const VM = struct {
         }
 
         self.resetStack();
+    }
+
+    fn slot(self: *VM, i: usize) Value {
+        return self.stack.items[self.currentFrame().base + i];
+    }
+
+    fn slotPtr(self: *VM, i: usize) *Value {
+        return &self.stack.items[self.currentFrame().base + i];
     }
 
     fn currentFrame(self: *VM) *CallFrame {
