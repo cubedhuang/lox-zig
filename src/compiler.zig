@@ -62,6 +62,7 @@ const Compiler = struct {
     type: FunctionType,
 
     locals: ArrayList(Local),
+    upvalues: ArrayList(Upvalue),
     scopeDepth: usize,
 
     pub fn init(vm: *VM, functionType: FunctionType) !Compiler {
@@ -70,6 +71,7 @@ const Compiler = struct {
         try locals.append(vm.allocator, Local{
             .name = "",
             .depth = 0,
+            .isCaptured = false,
         });
 
         return Compiler{
@@ -77,20 +79,28 @@ const Compiler = struct {
             .function = try Obj.Function.init(vm),
             .type = functionType,
             .locals = locals,
+            .upvalues = try ArrayList(Upvalue).initCapacity(vm.allocator, 0),
             .scopeDepth = 0,
         };
     }
 
     pub fn deinit(self: *Compiler, allocator: std.mem.Allocator) void {
         self.locals.deinit(allocator);
+        self.upvalues.deinit(allocator);
     }
 };
 
 const Local = struct {
     name: []const u8,
     depth: usize,
+    isCaptured: bool,
 
     pub const UNINITIALIZED = std.math.maxInt(usize);
+};
+
+const Upvalue = struct {
+    index: usize,
+    isLocal: bool,
 };
 
 const FunctionType = enum {
@@ -186,6 +196,21 @@ const Parser = struct {
             function.obj.toValue(),
         );
         try self.emitOpWithConstant(.Closure, .ClosureLong, constant);
+
+        for (compiler.upvalues.items) |upvalue| {
+            const long = upvalue.index > std.math.maxInt(u8);
+
+            var indicator: u8 = 0;
+            if (upvalue.isLocal) indicator += 2;
+            if (long) indicator += 1;
+            try self.emitByte(indicator);
+
+            if (long) {
+                try self.emitBytes(upvalue.index);
+            } else {
+                try self.emitByte(@intCast(upvalue.index));
+            }
+        }
     }
 
     fn varDeclaration(self: *Parser) !void {
@@ -394,6 +419,37 @@ const Parser = struct {
         return null;
     }
 
+    fn resolveUpvalue(self: *Parser, compiler: *Compiler, name: Token) !?usize {
+        if (compiler.enclosing == null) return null;
+
+        if (self.resolveLocal(compiler.enclosing.?, name)) |local| {
+            compiler.enclosing.?.locals.items[local].isCaptured = true;
+            return try self.addUpvalue(compiler, local, true);
+        }
+
+        if (try self.resolveUpvalue(compiler.enclosing.?, name)) |upvalue| {
+            return try self.addUpvalue(compiler, upvalue, false);
+        }
+
+        return null;
+    }
+
+    fn addUpvalue(self: *Parser, compiler: *Compiler, index: usize, isLocal: bool) !usize {
+        for (compiler.upvalues.items, 0..) |upvalue, i| {
+            if (upvalue.index == index and upvalue.isLocal == isLocal) {
+                return i;
+            }
+        }
+
+        const upvalue = Upvalue{
+            .index = index,
+            .isLocal = isLocal,
+        };
+        try compiler.upvalues.append(self.vm.allocator, upvalue);
+        compiler.function.upvalueCount += 1;
+        return compiler.upvalues.items.len - 1;
+    }
+
     fn declareVariable(self: *Parser) !void {
         if (self.compiler.scopeDepth == 0) return;
 
@@ -420,6 +476,7 @@ const Parser = struct {
         const local = Local{
             .name = name.lexeme,
             .depth = Local.UNINITIALIZED,
+            .isCaptured = false,
         };
         try self.compiler.locals.append(self.vm.allocator, local);
     }
@@ -553,6 +610,12 @@ const Parser = struct {
                     .{ OpCode.SetLocal, OpCode.SetLocalLong },
                     .{ OpCode.GetLocal, OpCode.GetLocalLong },
                 };
+            } else if (try self.resolveUpvalue(self.compiler, name)) |upvalue| {
+                break :resolve .{
+                    upvalue,
+                    .{ OpCode.SetUpvalue, OpCode.SetUpvalueLong },
+                    .{ OpCode.GetUpvalue, OpCode.GetUpvalueLong },
+                };
             } else {
                 break :resolve .{
                     try self.identifierConstant(name),
@@ -604,7 +667,11 @@ const Parser = struct {
         while (self.compiler.locals.items.len > 0 and
             self.compiler.locals.getLast().depth > self.compiler.scopeDepth)
         {
-            try self.emitOp(.Pop);
+            if (self.compiler.locals.getLast().isCaptured) {
+                try self.emitOp(.CloseUpvalue);
+            } else {
+                try self.emitOp(.Pop);
+            }
             _ = self.compiler.locals.pop();
         }
     }
@@ -690,9 +757,7 @@ const Parser = struct {
             self.err("Loop body too large.");
         }
 
-        try self.emitByte(@intCast(offset >> 16));
-        try self.emitByte(@intCast((offset >> 8) & 0xFF));
-        try self.emitByte(@intCast(offset & 0xFF));
+        try self.emitBytes(offset);
     }
 
     fn emitOpWithConstant(self: *Parser, op: OpCode, opLong: OpCode, constant: usize) !void {
@@ -726,6 +791,12 @@ const Parser = struct {
 
     fn emitOp(self: *Parser, op: OpCode) !void {
         try self.emitByte(@intFromEnum(op));
+    }
+
+    fn emitBytes(self: *Parser, bytes: usize) !void {
+        try self.emitByte(@intCast(bytes >> 16));
+        try self.emitByte(@intCast((bytes >> 8) & 0xFF));
+        try self.emitByte(@intCast(bytes & 0xFF));
     }
 
     fn emitByte(self: *Parser, byte: u8) !void {

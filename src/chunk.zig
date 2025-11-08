@@ -10,6 +10,7 @@ pub const OpCode = enum(u8) {
     True,
     False,
     Pop,
+
     GetLocal,
     GetLocalLong,
     SetLocal,
@@ -20,22 +21,31 @@ pub const OpCode = enum(u8) {
     DefineGlobalLong,
     SetGlobal,
     SetGlobalLong,
+    GetUpvalue,
+    GetUpvalueLong,
+    SetUpvalue,
+    SetUpvalueLong,
+
     Equal,
     Greater,
     Less,
+
     Add,
     Subtract,
     Multiply,
     Divide,
+
     Not,
     Negate,
     Print,
+
     Jump,
     JumpIfFalse,
     Loop,
     Call,
     Closure,
     ClosureLong,
+    CloseUpvalue,
     Return,
 };
 
@@ -169,6 +179,10 @@ pub const Chunk = struct {
             .DefineGlobalLong => self.constantInstruction("DefineGlobalLong", true, offset),
             .SetGlobal => self.constantInstruction("SetGlobal", false, offset),
             .SetGlobalLong => self.constantInstruction("SetGlobalLong", true, offset),
+            .GetUpvalue => self.byteInstruction("GetUpvalue", false, offset),
+            .GetUpvalueLong => self.byteInstruction("GetUpvalueLong", true, offset),
+            .SetUpvalue => self.byteInstruction("SetUpvalue", false, offset),
+            .SetUpvalueLong => self.byteInstruction("SetUpvalueLong", true, offset),
             .Equal => simpleInstruction("Equal", offset),
             .Greater => simpleInstruction("Greater", offset),
             .Less => simpleInstruction("Less", offset),
@@ -185,6 +199,7 @@ pub const Chunk = struct {
             .Call => self.byteInstruction("Call", false, offset),
             .Closure => self.closureInstruction(false, offset),
             .ClosureLong => self.closureInstruction(true, offset),
+            .CloseUpvalue => simpleInstruction("CloseUpvalue", offset),
             .Return => simpleInstruction("Return", offset),
         };
     }
@@ -266,6 +281,29 @@ pub const Chunk = struct {
             constant,
             self.constants.items[constant],
         });
+
+        const function = self.constants.items[constant].asObj().asFunction();
+        for (0..function.upvalueCount) |_| {
+            const originalOff = off;
+
+            const indicator = self.code.items[off];
+            off += 1;
+            const isLong = (indicator & 1) != 0;
+            const isLocal = (indicator >> 1) != 0;
+
+            const index = self.read(isLong, off);
+            if (isLong) {
+                off += 3;
+            } else {
+                off += 1;
+            }
+
+            std.debug.print("{d:04}      |                     {s} {d}\n", .{
+                originalOff,
+                if (isLocal) "local" else "upvalue",
+                index,
+            });
+        }
 
         return off;
     }

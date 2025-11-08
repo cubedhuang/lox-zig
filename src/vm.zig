@@ -30,6 +30,7 @@ pub const VM = struct {
     stack: ArrayList(Value),
     globals: Table,
     strings: Table,
+    openUpvalues: ?*Obj.Upvalue,
     objects: ?*Obj,
 
     pub fn init(allocator: Allocator) !VM {
@@ -39,6 +40,7 @@ pub const VM = struct {
             .stack = try ArrayList(Value).initCapacity(allocator, 0),
             .globals = Table.init(allocator),
             .strings = Table.init(allocator),
+            .openUpvalues = null,
             .objects = null,
         };
 
@@ -80,11 +82,13 @@ pub const VM = struct {
     }
 
     fn run(self: *VM) !void {
+        var frame = self.currentFrame();
+
         while (true) {
             if (DEBUG_TRACE_EXECUTION) {
                 self.printStack();
 
-                _ = self.currentChunk().disassembleInstruction(self.currentFrame().ip);
+                _ = self.currentChunk().disassembleInstruction(frame.ip);
             }
 
             const instruction = self.readByte();
@@ -129,6 +133,14 @@ pub const VM = struct {
                         return error.RuntimeError;
                     }
                 },
+                .GetUpvalue, .GetUpvalueLong => {
+                    const index = self.readBytes(op == .GetUpvalueLong);
+                    try self.push(frame.closure.upvalues[index].?.location.*);
+                },
+                .SetUpvalue, .SetUpvalueLong => {
+                    const index = self.readBytes(op == .SetUpvalueLong);
+                    frame.closure.upvalues[index].?.location.* = self.peek(0);
+                },
                 .Equal => try self.push(Value.fromBool(self.pop().equals(self.pop()))),
                 .Greater => try self.binary(Value.fromBool, gt),
                 .Less => try self.binary(Value.fromBool, lt),
@@ -165,28 +177,49 @@ pub const VM = struct {
                 },
                 .Jump => {
                     const offset = self.readBytes(true);
-                    self.currentFrame().ip += offset;
+                    frame.ip += offset;
                 },
                 .JumpIfFalse => {
                     const offset = self.readBytes(true);
-                    if (self.peek(0).isFalsey()) self.currentFrame().ip += offset;
+                    if (self.peek(0).isFalsey()) frame.ip += offset;
                 },
                 .Loop => {
                     const offset = self.readBytes(true);
-                    self.currentFrame().ip -= offset;
+                    frame.ip -= offset;
                 },
                 .Call => {
                     const count = self.readByte();
                     try self.callValue(self.peek(count), count);
+                    frame = self.currentFrame();
                 },
                 .Closure, .ClosureLong => {
                     const function = self.readConstant(op == .ClosureLong).asObj().asFunction();
                     const closure = try Obj.Closure.init(self, function);
                     try self.push(closure.obj.toValue());
+
+                    for (0..closure.upvalues.len) |i| {
+                        const indicator = self.readByte();
+                        const isLong = (indicator & 1) != 0;
+                        const isLocal = (indicator >> 1) != 0;
+
+                        const index = self.readBytes(isLong);
+
+                        if (isLocal) {
+                            closure.upvalues[i] =
+                                try self.captureUpvalue(self.slotPtr(index));
+                        } else {
+                            closure.upvalues[i] = frame.closure.upvalues[i];
+                        }
+                    }
+                },
+                .CloseUpvalue => {
+                    self.closeUpvalues(self.peekPtr(0));
+                    _ = self.pop();
                 },
                 .Return => {
                     const result = self.pop();
-                    const frame = self.frames.pop().?;
+                    self.closeUpvalues(self.slotPtr(0));
+                    _ = self.frames.pop().?;
                     if (self.frames.items.len == 0) {
                         _ = self.pop();
                         return;
@@ -194,6 +227,7 @@ pub const VM = struct {
 
                     self.stack.items.len = frame.base;
                     try self.push(result);
+                    frame = self.currentFrame();
                 },
             }
         }
@@ -254,6 +288,46 @@ pub const VM = struct {
             .base = self.stack.items.len - @as(usize, @intCast(count)) - 1,
         };
         try self.frames.append(self.allocator, frame);
+    }
+
+    fn captureUpvalue(self: *VM, local: *Value) !*Obj.Upvalue {
+        var prevUpvalue: ?*Obj.Upvalue = null;
+        var upvalue = self.openUpvalues;
+        while (upvalue) |up| {
+            if (@intFromPtr(up.location) <= @intFromPtr(local)) {
+                break;
+            }
+            prevUpvalue = up;
+            upvalue = up.next;
+        }
+
+        if (upvalue) |up| {
+            if (up.location == local) {
+                return up;
+            }
+        }
+
+        var createdUpvalue = try Obj.Upvalue.init(self, local);
+        createdUpvalue.next = upvalue;
+
+        if (prevUpvalue) |prev| {
+            prev.next = createdUpvalue;
+        } else {
+            self.openUpvalues = createdUpvalue;
+        }
+
+        return createdUpvalue;
+    }
+
+    fn closeUpvalues(self: *VM, last: *Value) void {
+        while (self.openUpvalues) |upvalue| {
+            if (@intFromPtr(upvalue.location) < @intFromPtr(last)) {
+                break;
+            }
+            upvalue.closed = upvalue.location.*;
+            upvalue.location = &upvalue.closed;
+            self.openUpvalues = upvalue.next;
+        }
     }
 
     fn printStack(self: *VM) void {
@@ -337,6 +411,10 @@ pub const VM = struct {
 
     fn peek(self: *VM, distance: usize) Value {
         return self.stack.items[self.stack.items.len - 1 - distance];
+    }
+
+    fn peekPtr(self: *VM, distance: usize) *Value {
+        return &self.stack.items[self.stack.items.len - 1 - distance];
     }
 
     fn push(self: *VM, value: Value) !void {

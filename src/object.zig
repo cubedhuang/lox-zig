@@ -12,6 +12,7 @@ pub const Obj = struct {
         Function,
         Native,
         String,
+        Upvalue,
         Closure,
     };
 
@@ -41,8 +42,13 @@ pub const Obj = struct {
                 allocator.free(string.buffer);
                 allocator.destroy(string);
             },
+            .Upvalue => {
+                const upvalue = self.asUpvalue();
+                allocator.destroy(upvalue);
+            },
             .Closure => {
                 const closure = self.asClosure();
+                allocator.free(closure.upvalues);
                 allocator.destroy(closure);
             },
         }
@@ -56,6 +62,7 @@ pub const Obj = struct {
                 writer.print("<script>", .{}),
             .Native => writer.print("<native fn>", .{}),
             .String => writer.print("{s}", .{self.asString().buffer}),
+            .Upvalue => writer.print("<upvalue>", .{}),
             .Closure => self.asClosure().function.obj.format(writer),
         };
     }
@@ -96,15 +103,21 @@ pub const Obj = struct {
         return @fieldParentPtr("obj", self);
     }
 
+    fn asUpvalue(self: *Obj) *Upvalue {
+        return @fieldParentPtr("obj", self);
+    }
+
     pub const Function = struct {
         obj: Obj,
         arity: usize,
+        upvalueCount: usize,
         chunk: Chunk,
         name: ?*String,
 
         pub fn init(vm: *VM) !*Function {
             var function = try Obj.init(vm, Function, .Function);
             function.arity = 0;
+            function.upvalueCount = 0;
             function.name = null;
             function.chunk = try Chunk.init(vm.allocator);
             return function;
@@ -168,13 +181,33 @@ pub const Obj = struct {
         }
     };
 
+    pub const Upvalue = struct {
+        obj: Obj,
+        location: *Value,
+        closed: Value,
+        next: ?*Upvalue,
+
+        pub fn init(vm: *VM, slot: *Value) !*Upvalue {
+            var upvalue = try Obj.init(vm, Upvalue, .Upvalue);
+            upvalue.location = slot;
+            upvalue.closed = Value.nil();
+            upvalue.next = null;
+            return upvalue;
+        }
+    };
+
     pub const Closure = struct {
         obj: Obj,
         function: *Function,
+        upvalues: []?*Upvalue,
 
         pub fn init(vm: *VM, function: *Function) !*Closure {
             var closure = try Obj.init(vm, Closure, .Closure);
+
             closure.function = function;
+            closure.upvalues = try vm.allocator.alloc(?*Upvalue, function.upvalueCount);
+            for (closure.upvalues) |*upvalue| upvalue.* = null;
+
             return closure;
         }
     };
