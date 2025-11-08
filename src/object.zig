@@ -12,6 +12,7 @@ pub const Obj = struct {
         Function,
         Native,
         String,
+        Closure,
     };
 
     pub fn init(vm: *VM, comptime T: type, objectType: Type) !*T {
@@ -40,6 +41,10 @@ pub const Obj = struct {
                 allocator.free(string.buffer);
                 allocator.destroy(string);
             },
+            .Closure => {
+                const closure = self.asClosure();
+                allocator.destroy(closure);
+            },
         }
     }
 
@@ -51,6 +56,7 @@ pub const Obj = struct {
                 writer.print("<script>", .{}),
             .Native => writer.print("<native fn>", .{}),
             .String => writer.print("{s}", .{self.asString().buffer}),
+            .Closure => self.asClosure().function.obj.format(writer),
         };
     }
 
@@ -70,6 +76,10 @@ pub const Obj = struct {
         return self.type == .String;
     }
 
+    pub fn isClosure(self: *Obj) bool {
+        return self.type == .Closure;
+    }
+
     pub fn asFunction(self: *Obj) *Function {
         return @fieldParentPtr("obj", self);
     }
@@ -79,6 +89,10 @@ pub const Obj = struct {
     }
 
     pub fn asString(self: *Obj) *String {
+        return @fieldParentPtr("obj", self);
+    }
+
+    pub fn asClosure(self: *Obj) *Closure {
         return @fieldParentPtr("obj", self);
     }
 
@@ -151,6 +165,17 @@ pub const Obj = struct {
                 hash *%= 16777619;
             }
             return hash;
+        }
+    };
+
+    pub const Closure = struct {
+        obj: Obj,
+        function: *Function,
+
+        pub fn init(vm: *VM, function: *Function) !*Closure {
+            var closure = try Obj.init(vm, Closure, .Closure);
+            closure.function = function;
+            return closure;
         }
     };
 };

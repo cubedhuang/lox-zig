@@ -18,7 +18,7 @@ pub const InterpretError = error{
 };
 
 const CallFrame = struct {
-    function: *Obj.Function,
+    closure: *Obj.Closure,
     ip: usize,
     base: usize,
 };
@@ -71,7 +71,10 @@ pub const VM = struct {
         const function = try compile(self, source);
 
         try self.push(function.obj.toValue());
-        try self.call(function, 0);
+        const closure = try Obj.Closure.init(self, function);
+        _ = self.pop();
+        try self.push(closure.obj.toValue());
+        try self.call(closure, 0);
 
         try self.run();
     }
@@ -176,6 +179,11 @@ pub const VM = struct {
                     const count = self.readByte();
                     try self.callValue(self.peek(count), count);
                 },
+                .Closure, .ClosureLong => {
+                    const function = self.readConstant(op == .ClosureLong).asObj().asFunction();
+                    const closure = try Obj.Closure.init(self, function);
+                    try self.push(closure.obj.toValue());
+                },
                 .Return => {
                     const result = self.pop();
                     const frame = self.frames.pop().?;
@@ -213,7 +221,7 @@ pub const VM = struct {
     fn callValue(self: *VM, callee: Value, argCount: u8) !void {
         if (callee.isObj()) {
             switch (callee.asObj().type) {
-                .Function => return self.call(callee.asObj().asFunction(), argCount),
+                .Closure => return self.call(callee.asObj().asClosure(), argCount),
                 .Native => {
                     const native = callee.asObj().asNative();
                     const result = native.function(
@@ -231,9 +239,9 @@ pub const VM = struct {
         return error.RuntimeError;
     }
 
-    fn call(self: *VM, callee: *Obj.Function, count: u8) !void {
-        if (count != callee.arity) {
-            self.runtimeError("Expected {d} arguments but got {d}.", .{ callee.arity, count });
+    fn call(self: *VM, closure: *Obj.Closure, count: u8) !void {
+        if (count != closure.function.arity) {
+            self.runtimeError("Expected {d} arguments but got {d}.", .{ closure.function.arity, count });
             return error.RuntimeError;
         }
 
@@ -241,7 +249,7 @@ pub const VM = struct {
         // it's not necessary now since our stack is an arraylist
 
         const frame = CallFrame{
-            .function = callee,
+            .closure = closure,
             .ip = 0,
             .base = self.stack.items.len - @as(usize, @intCast(count)) - 1,
         };
@@ -298,7 +306,7 @@ pub const VM = struct {
         while (i > 0) {
             i -= 1;
             const frame = &self.frames.items[i];
-            const function = frame.function;
+            const function = frame.closure.function;
             const line = function.chunk.getLine(frame.ip - 1);
             std.debug.print("[line {d}] in ", .{line});
             if (function.name) |name| {
@@ -324,7 +332,7 @@ pub const VM = struct {
     }
 
     fn currentChunk(self: *VM) *Chunk {
-        return &self.currentFrame().function.chunk;
+        return &self.currentFrame().closure.function.chunk;
     }
 
     fn peek(self: *VM, distance: usize) Value {

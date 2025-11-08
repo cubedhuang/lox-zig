@@ -34,6 +34,8 @@ pub const OpCode = enum(u8) {
     JumpIfFalse,
     Loop,
     Call,
+    Closure,
+    ClosureLong,
     Return,
 };
 
@@ -151,22 +153,22 @@ pub const Chunk = struct {
 
         const instruction = @as(OpCode, @enumFromInt(self.code.items[offset]));
         return switch (instruction) {
-            .Constant => self.constantInstruction("Constant", offset),
-            .ConstantLong => self.constantLongInstruction("ConstantLong", offset),
+            .Constant => self.constantInstruction("Constant", false, offset),
+            .ConstantLong => self.constantInstruction("ConstantLong", true, offset),
             .Nil => simpleInstruction("Nil", offset),
             .True => simpleInstruction("True", offset),
             .False => simpleInstruction("False", offset),
             .Pop => simpleInstruction("Pop", offset),
-            .GetLocal => self.byteInstruction("GetLocal", offset),
-            .GetLocalLong => self.byteLongInstruction("GetLocalLong", offset),
-            .SetLocal => self.byteInstruction("SetLocal", offset),
-            .SetLocalLong => self.byteLongInstruction("SetLocalLong", offset),
-            .GetGlobal => self.constantInstruction("GetGlobal", offset),
-            .GetGlobalLong => self.constantLongInstruction("GetGlobalLong", offset),
-            .DefineGlobal => self.constantInstruction("DefineGlobal", offset),
-            .DefineGlobalLong => self.constantLongInstruction("DefineGlobalLong", offset),
-            .SetGlobal => self.constantInstruction("SetGlobal", offset),
-            .SetGlobalLong => self.constantLongInstruction("SetGlobalLong", offset),
+            .GetLocal => self.byteInstruction("GetLocal", false, offset),
+            .GetLocalLong => self.byteInstruction("GetLocalLong", true, offset),
+            .SetLocal => self.byteInstruction("SetLocal", false, offset),
+            .SetLocalLong => self.byteInstruction("SetLocalLong", true, offset),
+            .GetGlobal => self.constantInstruction("GetGlobal", false, offset),
+            .GetGlobalLong => self.constantInstruction("GetGlobalLong", true, offset),
+            .DefineGlobal => self.constantInstruction("DefineGlobal", false, offset),
+            .DefineGlobalLong => self.constantInstruction("DefineGlobalLong", true, offset),
+            .SetGlobal => self.constantInstruction("SetGlobal", false, offset),
+            .SetGlobalLong => self.constantInstruction("SetGlobalLong", true, offset),
             .Equal => simpleInstruction("Equal", offset),
             .Greater => simpleInstruction("Greater", offset),
             .Less => simpleInstruction("Less", offset),
@@ -180,7 +182,9 @@ pub const Chunk = struct {
             .Jump => self.jumpInstruction("Jump", 1, offset),
             .JumpIfFalse => self.jumpInstruction("JumpIfFalse", 1, offset),
             .Loop => self.jumpInstruction("Loop", -1, offset),
-            .Call => self.byteInstruction("Call", offset),
+            .Call => self.byteInstruction("Call", false, offset),
+            .Closure => self.closureInstruction(false, offset),
+            .ClosureLong => self.closureInstruction(true, offset),
             .Return => simpleInstruction("Return", offset),
         };
     }
@@ -203,56 +207,79 @@ pub const Chunk = struct {
         return offset + 1;
     }
 
-    fn constantInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const constant = self.code.items[offset + 1];
+    fn constantInstruction(self: *const Chunk, name: []const u8, long: bool, offset: usize) usize {
+        var off = offset + 1;
+        const constant = self.read(long, off);
+        if (long) {
+            off += 3;
+        } else {
+            off += 1;
+        }
+
         const value = self.constants.items[constant];
 
         std.debug.print("{s:<16} {d:4} '{f}'\n", .{ name, constant, value });
 
-        return offset + 2;
+        return off;
     }
 
-    fn constantLongInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const constant = self.readLong(offset);
-        const value = self.constants.items[constant];
-
-        std.debug.print("{s:<16} {d:4} '{f}'\n", .{ name, constant, value });
-
-        return offset + 4;
-    }
-
-    fn byteInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const slot = self.code.items[offset + 1];
+    fn byteInstruction(self: *const Chunk, name: []const u8, long: bool, offset: usize) usize {
+        var off = offset + 1;
+        const slot = self.read(long, off);
+        if (long) {
+            off += 3;
+        } else {
+            off += 1;
+        }
 
         std.debug.print("{s:<16} {d:4}\n", .{ name, slot });
 
-        return offset + 2;
-    }
-
-    fn byteLongInstruction(self: *const Chunk, name: []const u8, offset: usize) usize {
-        const slot = self.readLong(offset);
-
-        std.debug.print("{s:<16} {d:4}\n", .{ name, slot });
-
-        return offset + 4;
+        return off;
     }
 
     fn jumpInstruction(self: *const Chunk, name: []const u8, sign: isize, offset: usize) usize {
-        const jump = self.readLong(offset);
+        var off = offset + 1;
+        const jump = self.readLong(off);
+        off += 3;
 
         std.debug.print("{s:<16} {d:4} -> {d}\n", .{
             name,
             offset,
-            @as(isize, @intCast(offset + 4)) +
+            @as(isize, @intCast(off)) +
                 sign * @as(isize, @intCast(jump)),
         });
 
-        return offset + 4;
+        return off;
+    }
+
+    fn closureInstruction(self: *const Chunk, long: bool, offset: usize) usize {
+        var off = offset + 1;
+        const constant = self.read(long, off);
+        if (long) {
+            off += 3;
+        } else {
+            off += 1;
+        }
+
+        std.debug.print("{s:<16} {d:4} {f}\n", .{
+            if (long) "ClosureLong" else "Closure",
+            constant,
+            self.constants.items[constant],
+        });
+
+        return off;
+    }
+
+    fn read(self: *const Chunk, long: bool, offset: usize) usize {
+        return if (long)
+            self.readLong(offset)
+        else
+            self.code.items[offset];
     }
 
     fn readLong(self: *const Chunk, offset: usize) usize {
-        return (@as(usize, self.code.items[offset + 1]) << 16) +
-            (@as(usize, self.code.items[offset + 2]) << 8) +
-            self.code.items[offset + 3];
+        return (@as(usize, self.code.items[offset]) << 16) +
+            (@as(usize, self.code.items[offset + 1]) << 8) +
+            self.code.items[offset + 2];
     }
 };

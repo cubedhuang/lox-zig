@@ -181,7 +181,11 @@ const Parser = struct {
         try self.block();
 
         const function = try self.endCompiler();
-        try self.emitConstant(function.obj.toValue());
+        const constant = try self.currentChunk().addConstant(
+            self.vm.allocator,
+            function.obj.toValue(),
+        );
+        try self.emitOpWithConstant(.Closure, .ClosureLong, constant);
     }
 
     fn varDeclaration(self: *Parser) !void {
